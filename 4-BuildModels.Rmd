@@ -1,0 +1,620 @@
+---
+title: "PHD: Build Models"
+author: "Batch39: 1843 - Gayathri Eshwarappa"
+date: "Jul 2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+# Prepare data for modelling
+
+**Read pre processed train & test data from disk
+```{r}
+trainDT <- fread(input="TrainFinal.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+testDT <- fread(input="TestFinal.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+testFlightNumber <- fread(input="sampleSubmission.csv", sep=',', header=TRUE)
+
+```
+
+
+*Combining Train & Test first & then convert categorical features to factors to avoid levels mismatch in train & test
+*Combine by adding dummy column to test data for target variable. convert required features to factor and segregate train & test back
+```{r}
+setcolorder(trainDT, c(setdiff(colnames(trainDT), "FlightDelayStatus"), "FlightDelayStatus"))
+testDT[, FlightDelayStatus := 'No']
+trainDT[, "DataType" := "Train"]
+testDT[, "DataType" := "Test"]
+
+combinedDT <- rbindlist(list(trainDT, testDT))
+combinedDT <- UDFConvertFeaturesToFactor(combinedDT, names(Filter(is.character, combinedDT)))
+combinedDT <- UDFConvertFeaturesToNumeric(combinedDT, setdiff(colnames(combinedDT), names(Filter(is.factor, combinedDT))))
+
+trainDT <- combinedDT[DataType=="Train", ]
+testDT <- combinedDT[DataType=="Test", ]
+testDT$FlightDelayStatus <- NULL
+trainDT$DataType <- NULL
+testDT$DataType <-  NULL
+rm(combinedDT)
+```
+
+## Divide given Train data into Train, Validation with 85:15 split**
+```{r}
+set.seed(1122)
+
+trainRows <- createDataPartition(trainDT$FlightDelayStatus, p = 0.8, list = F)
+trainFinal <- trainDT[trainRows, ]
+valFinal <- trainDT[-trainRows, ]
+testFinal <- testDT
+
+table(trainFinal$FlightDelayStatus)
+table(valFinal$FlightDelayStatus)
+
+```
+
+
+# Build Base Models
+
+## Basic GLM model
+```{r}
+
+columnsToRemove <- c("SkyConditions_ORG","SkyConditions_DST", "VisibilityDiff", "RelativeHumidityPercentDiff")
+columnsToConsider <- setdiff(colnames(trainFinal), columnsToRemove)
+
+basicGlm <- glm(FlightDelayStatus~., family=binomial, data=trainFinal[, ..columnsToConsider])
+
+UDFPlotRoc(basicGlm, trainFinal$FlightDelayStatus)
+UDFGetAucValue(basicGlm, trainFinal$FlightDelayStatus)
+
+summary(basicGlm)
+```
+
+** Check GLM model performance on validation & predict on test
+```{r}
+valPredsProb <- predict(basicGlm, valFinal, type = "response")
+
+for(i in seq(0.35, 0.5, 0.01)){
+  preds <- ifelse(valPredsProb > i, "Yes", "No")
+  modelMatrix <- UDFGetModelMetrics("Basic GLM", "Val", valFinal$FlightDelayStatus, preds)
+  print(paste0("Threshold: ", i, " F1: ", modelMatrix$F1[1]))
+}
+
+trainPredsProb <- predict(basicGlm, trainFinal, type = "response")
+trainPreds <- ifelse(trainPredsProb > 0.35, "Yes", "No")
+valPreds <- ifelse(valPredsProb > 0.35, "Yes", "No")
+
+testPreds <- predict(basicGlm, testDT, type="response")
+testPreds <- ifelse(testPreds > 0.35, "Yes", "No")
+UDFCreateTestSubmissionFile(testPreds, "GLM.csv")
+
+```
+
+
+**VIF Of Basic GLM
+```{r}
+vifGlm <- vif(basicGlm)
+vifGlm
+
+```
+
+
+
+## C5 Tree Model
+```{r}
+
+columnsToRemove <- c("SkyConditions_ORG", "SkyConditions_DST")
+columnsToConsider <- setdiff(colnames(trainFinal), columnsToRemove)
+
+C5_TREE_MODEL = C5.0(FlightDelayStatus~., trainFinal[, ..columnsToConsider])
+
+UDFGetModelMetrics("C5_TREE_MODEL", "Train", trainFinal$FlightDelayStatus,
+                    predict(C5_TREE_MODEL, trainFinal, type = "class"))
+
+UDFGetModelMetrics("C5_TREE_MODEL", "Validation", valFinal$FlightDelayStatus,
+                    predict(C5_TREE_MODEL, valFinal, type = "class"))
+
+UDFCreateTestSubmissionFile(predict(C5_TREE_MODEL, testFinal), "C5_TREE_MODEL.csv")
+```
+
+**Tune CART for important attributes**
+```{r}
+c5Importance <- C5imp(C5_TREE_MODEL)
+c5Importance <- data.frame("Attributes" = row.names(c5Importance), 
+                           "Importance" = c5Importance[, 1])
+c5Importance <- arrange(c5Importance, desc(Importance))
+
+for(n in 2:15)
+{
+  topNAttr <- as.character(c5Importance[1:n, 1])
+  C5_IMP_FEATURES <- C5.0(x = trainFinal[, ..topNAttr], y = trainFinal$FlightDelayStatus, 
+                          control = C5.0Control(minCases = 15))
+  metrics <- UDFGetModelMetrics("C5_IMP_FEATURES", "Validation", valFinal$FlightDelayStatus,
+                    predict(C5_IMP_FEATURES, valFinal, type = "class"))
+  UDFCreateTestSubmissionFile(predict(C5_IMP_FEATURES, testFinal), paste0(n,"C5_IMP_FEATURES.csv"))
+  print(paste0("N = ", n, ", F1 = ", metrics[1, 'F1']))
+}
+
+top8Attr <- as.character(c5Importance[1:8, 1])
+C5_IMP8_FEATURES <- C5.0(x = trainFinal[, ..top8Attr], y = trainFinal$FlightDelayStatus, 
+                          control = C5.0Control(minCases = 15))
+UDFGetModelMetrics("C5_IMP8_FEATURES", "Validation", valFinal$FlightDelayStatus,
+                    predict(C5_IMP8_FEATURES, valFinal, type = "class"))
+
+# Top 8 features has nearly good F1 score of .564 in Validation & 0.4708 in Test
+# Top 8 features are 
+as.character(c5Importance[1:8, 1])
+```
+
+## CART tree Model
+
+```{r}
+CART_BASIC <- rpart(FlightDelayStatus ~ ., trainFinal[, ..columnsToConsider], control = rpart.control(cp = 0.004))
+plotcp(CART_BASIC)
+
+UDFGetModelMetrics("CART_BASIC", "Train", trainFinal$FlightDelayStatus, 
+                   predict(CART_BASIC, trainFinal, type = "class"))
+
+UDFGetModelMetrics("CART_BASIC", "Validation", valFinal$FlightDelayStatus,
+                    predict(CART_BASIC, valFinal,type = "class"))
+
+
+#Get Tuned CP value and rebuild the model
+options(scipen = 6)
+cp_min <- CART_BASIC$cptable[which.min(CART_BASIC$cptable[, "xerror"]), "CP"]; cp_min
+
+CART_CP_TUNED <- rpart(FlightDelayStatus~., trainFinal, control = rpart.control(cp = cp_min))
+
+UDFGetModelMetrics("CART_CP_TUNED", "Train", trainFinal$FlightDelayStatus,
+                    predict(CART_CP_TUNED, trainFinal, type = "class"))
+
+UDFGetModelMetrics("CART_CP_TUNED", "Validation", valFinal$FlightDelayStatus,
+                    predict(CART_CP_TUNED, valFinal, type = "class"))
+
+UDFCreateTestSubmissionFile(predict(CART_BASIC, testFinal, type = "class"), "CART_BASIC.csv")
+UDFCreateTestSubmissionFile(predict(CART_CP_TUNED, testFinal, type = "class"), "CART_CP_TUNED.csv")
+
+#plot(CART_BASIC, uniform = T, main = "CART Tree")
+#text(CART_BASIC, use.n = T, all = T, cex = 0.8)
+
+```
+
+# Build models using H2O package
+
+*Build H2O Based Models by running Gradient Boosting, Random Forest on H2O clusters
+**Launch local H2O cluster**
+```{r}
+localH2O <- h2o.init(nthreads = -1, min_mem_size = "4g")
+h2o.init()
+
+#Transfer Data from R to h2o instance
+trainH2O <- as.h2o(trainFinal)
+validationH2O <- as.h2o(valFinal)
+testH2O <- as.h2o(testDT)
+
+#Seperate dependent and independent variables to be used in modelling
+target <- "FlightDelayStatus"
+predictors <- setdiff(colnames(trainH2O), "target")
+```
+
+
+## Build GLM in H20
+```{r}
+GLM_H2O_MODEL = h2o.glm(x = predictors, y = target,
+                        training_frame = trainH2O,
+                        validation_frame = validationH2O,
+                        nfolds = 5,
+                        family = 'binomial',
+                        lambda_search = TRUE,
+                        early_stopping = T,
+                        seed = 1234)
+
+h2o.performance(GLM_H2O_MODEL)
+
+UDFGetModelMetrics("GLM_H2O_MODEL", "Train", trainFinal$FlightDelayStatus,
+                    UDFGetH2OModelPreds(GLM_H2O_MODEL, trainH2O))
+UDFGetModelMetrics("GLM_H2O_MODEL", "Validation", valFinal$FlightDelayStatus,
+                   UDFGetH2OModelPreds(GLM_H2O_MODEL, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(GLM_H2O_MODEL, testH2O), "GLM_H2O_MODEL.csv")
+
+# Test = 51.58
+
+```
+
+
+
+
+## Build GBM model in H2O
+
+**Grid Search for GBM**
+```{r}
+
+gbmHyperParams <- list(ntrees = seq(100,1000,100), 
+                       max_depth = seq(6,25), 
+                       min_rows = seq(10,150, 10),
+                       learn_rate = seq(0.001,0.1,0.001),
+                       sample_rate = seq(0.4,1,0.05),
+                       col_sample_rate = seq(0.4,1,0.05),
+                       col_sample_rate_per_tree = seq(0.4,1,0.05))
+
+gbmSearchCriteria <- list(strategy = "RandomDiscrete", 
+                       max_runtime_secs = 800, 
+                       max_models = 500, 
+                       stopping_metric = "AUTO", 
+                       stopping_tolerance = 0.00001, 
+                       stopping_rounds = 10, 
+                       seed = 123)
+
+# Train and validate a random grid of GBMs
+gbmGrid <- h2o.grid("gbm", grid_id = "gbmGrid",
+                     x = predictors, y = target,
+                     training_frame = trainH2O,
+                     validation_frame = validationH2O,
+                     nfolds = 5,
+                     distribution="bernoulli",
+                     hyper_params = gbmHyperParams,
+                     search_criteria = gbmSearchCriteria)
+
+gbmSortedGrid <- h2o.getGrid(grid_id = "gbmGrid", sort_by = "f1", decreasing = T)
+GBM_GRID_BEST <- h2o.getModel(gbmSortedGrid@model_ids[[1]])
+summary(GBM_GRID_BEST)
+print(gbmSortedGrid)
+
+UDFGetModelMetrics("GBM_GRID_BEST", "Train", trainFinal$FlightDelayStatus, 
+                    UDFGetH2OModelPreds(GBM_GRID_BEST, trainH2O))
+UDFGetModelMetrics("GBM_GRID_BEST", "Validation", valFinal$FlightDelayStatus, 
+                    UDFGetH2OModelPreds(GBM_GRID_BEST, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(GBM_GRID_BEST, testH2O), "GBM_GRID_BEST.csv")
+
+
+```
+
+** Cross Validation in GBM**
+```{r}
+GBM_CV <- h2o.gbm(x = predictors, y = target,
+                   training_frame = trainH2O, 
+                   validation_frame = validationH2O,
+                   ntrees = 300, 
+                   max_depth = 24, 
+                   learn_rate = 0.032,
+                   sample_rate = 0.45,
+                   col_sample_rate = 0.45,
+                   nfolds = 4,
+                   stopping_rounds = 10,
+                   stopping_metric = "AUC",
+                   distribution = "bernoulli",
+                   seed = 123)
+
+h2o.performance(GBM_CV)
+
+UDFGetModelMetrics("GBM_CV", "Train", trainFinal$FlightDelayStatus, 
+                    UDFGetH2OModelPreds(GBM_CV, trainH2O))
+UDFGetModelMetrics("GBM_CV", "Validation", valFinal$FlightDelayStatus, 
+                    UDFGetH2OModelPreds(GBM_CV, validationH2O))
+
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(GBM_CV, testH2O), "GBM_CV.csv")
+
+h2o.varimp_plot(GBM_CV, 15)
+
+```
+
+
+** Tuning for top important features for GBM**
+```{r warning=FALSE}
+gbmImportance <- h2o.varimp(GBM_CV)
+gbmImportance <- arrange(gbmImportance, desc(percentage))
+gbmImpPredictors <- as.vector(gbmImportance[, "variable"])
+
+for(n in 8:12)
+{
+  topNpredictors <- gbmImpPredictors[1:n]
+  
+  TUNE_GBM <- h2o.gbm(x = topNpredictors, y = target,
+                   training_frame = trainH2O, 
+                   validation_frame = validationH2O,
+                   ntrees = 300, 
+                   max_depth = 24, 
+                   learn_rate = 0.032,
+                   stopping_rounds = 10,
+                   stopping_metric = "AUTO",
+                   distribution = "bernoulli",
+                   seed = 123)
+  
+  metrics <- UDFGetModelMetrics("TUNE_GBM", "Validation", valFinal$FlightDelayStatus, 
+                                UDFGetH2OModelPreds(TUNE_GBM, validationH2O))
+  UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(TUNE_GBM, testH2O), paste0(n,"TUNE_GBM.csv"))
+  
+  print(paste0("N = ", n, ", F1 = ", metrics[1, 'F1']))
+  
+}
+
+#top 9 predictores
+as.character(gbmImpPredictors[1:9])
+
+
+rm(gbmImportance)
+```
+
+
+**Note : From top 9 attributes we get good F1 score on validation so running model for top 9 attributes**
+```{r}
+gbmImpFeatures <- c(gbmImpPredictors[1:9])
+GBM_H2O_IMP_FEATURES <- h2o.gbm(x = gbmImpFeatures, y = target,
+                                training_frame = trainH2O, 
+                                validation_frame = validationH2O,
+                                 ntrees = 300, 
+                                 max_depth = 24, 
+                                 learn_rate = 0.032,
+                                 stopping_rounds = 10,
+                                 stopping_metric = "AUC",
+                                 distribution = "bernoulli",
+                                 seed = 123)
+
+h2o.performance(GBM_H2O_IMP_FEATURES)
+
+UDFGetModelMetrics("GBM_H2O_IMP_FEATURES", "Train", trainFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(GBM_H2O_IMP_FEATURES, trainH2O))
+UDFGetModelMetrics("GBM_H2O_IMP_FEATURES", "Validation", valFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(GBM_H2O_IMP_FEATURES, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(GBM_H2O_IMP_FEATURES, testH2O), "GBM_H2O_IMP9_FEATURES.csv")
+
+h2o.varimp_plot(GBM_H2O_IMP_FEATURES, 12)
+
+
+```
+
+
+## Build Random Forest Classification model in H20
+**Grid Search RF
+```{r}
+rfHyperParams <- list(ntrees = seq(200,1000,100), 
+                     max_depth = seq(6,20,1), 
+                     col_sample_rate_per_tree = seq(0.4, 1, 0.05),
+                     mtries = seq(1,(length(trainFinal) - 1),1))
+
+searchCriteria <- list(strategy = "RandomDiscrete", 
+                       max_runtime_secs = 900, 
+                       max_models = 100, 
+                       stopping_metric = "AUTO", 
+                       stopping_tolerance = 0.00001, 
+                       stopping_rounds = 5, 
+                       seed = 123456)
+
+
+rfGrid <- h2o.grid("randomForest", 
+                    grid_id = "rfGrid",
+                    x = predictors, y = target, 
+                    training_frame = trainH2O, 
+                    validation_frame = validationH2O,
+                    nfolds = 5,
+                    hyper_params = rfHyperParams,
+                    search_criteria = searchCriteria)
+
+rfSortedGrid <- h2o.getGrid(grid_id = "rfGrid", sort_by = "f1", decreasing = T)
+print(rfSortedGrid)
+
+# Select the best model based on the error metrics used for evaluation
+RF_GRID_BEST <- h2o.getModel(rfSortedGrid@model_ids[[1]])
+summary(RF_GRID_BEST)
+
+#Parameters : col_sample_rate_per_tree : 0.55, max_depth = 13, mtries = 12, ntrees = 900
+
+UDFGetModelMetrics("RF_GRID_BEST", "Train", trainFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_GRID_BEST, trainH2O))
+UDFGetModelMetrics("RF_GRID_BEST", "Validation", valFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_GRID_BEST, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(RF_GRID_BEST, testH2O), "RF_GRID_BEST.csv")
+
+```
+
+** Cross Validating RF Model **
+```{r}
+
+
+RF_CV <- h2o.randomForest(x = predictors, y = target, 
+                          training_frame = trainH2O, 
+                          validation_frame = validationH2O,
+                          ntrees = 200, 
+                          max_depth = 20,
+                          col_sample_rate_per_tree = 0.65,
+                          stopping_rounds = 10,
+                          nfolds = 4,
+                          stopping_metric = "AUC",
+                          seed = 786)
+
+h2o.performance(RF_CV)
+
+UDFGetModelMetrics("RF_CV", "Train", trainFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_CV, trainH2O))
+UDFGetModelMetrics("RF_CV", "Validation", valFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_CV, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(RF_CV, testH2O), "RF_CV.csv")
+
+h2o.varimp_plot(RF_CV, 15)
+
+
+```
+
+
+** Tuning RF model for top important attributes **
+```{r warning=FALSE}
+rfImportance <- h2o.varimp(RF_CV)
+rfImportance <- arrange(rfImportance, desc(percentage))
+rfImpPredictors <- as.vector(rfImportance[, "variable"])
+
+for(n in 7:15)
+{
+  topNpredictors <- rfImpPredictors[1:n]
+  
+  TUNE_RF <- h2o.randomForest(x = topNpredictors, y = target, 
+                              training_frame = trainH2O, 
+                              ntrees = 200, 
+                              max_depth = 20,
+                              stopping_rounds = 10,
+                              stopping_metric = "AUC",
+                              seed = 786)
+  
+  metrics <- UDFGetModelMetrics("TUNE_RF", "Validation", valFinal$FlightDelayStatus, 
+                                UDFGetH2OModelPreds(TUNE_RF, validationH2O))
+  UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(TUNE_RF, testH2O), paste0(n,"RF_CV.csv"))
+  
+  print(paste0("N = ", n, ", F1 = ", metrics[1, 'F1']))
+  
+}
+
+rm(rfImportance)
+
+```
+
+**Note : From top 11 attributes we get good F1 score on validation so running model for top 11 attributes**
+```{r}
+rfImpFeatures <- c(rfImpPredictors[1:11])
+RF_H2O_IMP_FEATURES <- h2o.randomForest(x = rfImpFeatures, y = target, 
+                              training_frame = trainH2O, 
+                              ntrees = 200, 
+                              max_depth = 20,
+                              stopping_rounds = 10,
+                              stopping_metric = "AUC",
+                              seed = 786)
+
+h2o.performance(RF_H2O_IMP_FEATURES)
+
+UDFGetModelMetrics("RF_H2O_IMP_FEATURES", "Train", trainFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_H2O_IMP_FEATURES, trainH2O))
+UDFGetModelMetrics("RF_H2O_IMP_FEATURES", "Validation", valFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(RF_H2O_IMP_FEATURES, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(RF_H2O_IMP_FEATURES, testH2O), "RF_H2O_IMP_FEATURES.csv")
+
+h2o.varimp_plot(RF_H2O_IMP_FEATURES, 11)
+
+
+```
+
+
+## Build stacked model in H2O using RF & GBM models
+```{r warning=FALSE}
+
+# BUild RF model for stacking
+RF_STACK <- h2o.randomForest(x = predictors, y = target,
+                             training_frame = trainH2O,
+                             validation_frame = validationH2O,
+                             nfolds = 3,
+                             fold_assignment = "Modulo",
+                             keep_cross_validation_predictions = TRUE,
+                             col_sample_rate_per_tree = 0.65,
+                             ntrees = 300,
+                             max_depth = 20,
+                             seed = 1122)
+
+# Build GBM model for stack
+GBM_STACK <- h2o.gbm(x = predictors, y = target,
+                     training_frame = trainH2O,
+                     validation_frame = validationH2O,
+                     distribution = "bernoulli",
+                     nfolds = 3,
+                     fold_assignment = "Modulo",
+                     keep_cross_validation_predictions = TRUE,
+                     col_sample_rate = 0.45,
+                     col_sample_rate_per_tree = 0.45,
+                     ntrees = 300,
+                     max_depth = 20,
+                     learn_rate = 0.09,
+                     seed = 1122)
+
+
+# Build stacked ensemble in H2O using the GBM and RF models built above
+
+STACKED_H2O <- h2o.stackedEnsemble(x = predictors, y = target,
+                                   training_frame = trainH2O,
+                                   base_models = list(RF_STACK, GBM_STACK),
+                                   metalearner_algorithm = "gbm",
+                                   metalearner_params = list(ntrees = 100, max_depth = 4),
+                                   seed = 1122)
+
+
+h2o.performance(STACKED_H2O)
+
+UDFGetModelMetrics("STACKED_H2O", "Train", trainFinal$FlightDelayStatus,
+                   UDFGetH2OModelPreds(STACKED_H2O, trainH2O))
+UDFGetModelMetrics("STACKED_H2O", "Validation", valFinal$FlightDelayStatus,
+                   UDFGetH2OModelPreds(STACKED_H2O, validationH2O))
+
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(STACKED_H2O, testH2O), "STACKED_H2O_MODEL.csv")
+
+```
+
+
+
+## Build Auto ML in H2O
+```{r}
+# Build the model
+AUTO_ML <- h2o.automl(x = predictors, y = target,
+                      training_frame = trainH2O,
+                      leaderboard_frame = validationH2O,
+                      max_runtime_secs = 300)
+
+
+LeaderBoard <- AUTO_ML@leaderboard
+
+AUTO_ML_LEADER <- AUTO_ML@leader
+
+UDFGetModelMetrics("AUTO_ML_LEADER", "Train", trainFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(AUTO_ML_LEADER, trainH2O))
+UDFGetModelMetrics("AUTO_ML_LEADER", "Validation", valFinal$FlightDelayStatus, 
+                   UDFGetH2OModelPreds(AUTO_ML_LEADER, validationH2O))
+UDFCreateTestSubmissionFile(UDFGetH2OModelPreds(AUTO_ML_LEADER, testH2O), "AUTO_ML.csv")
+
+```
+
+** Initialize Data frame to capture evauation metrics of each model on Train data sets **
+```{r}
+
+ModelMetrics <- data.frame(Model = c(), Type = c(), Accuracy = c(), Kappa = c(), 
+                           Recall = c(), Precission = c(), Specificity = c(), F1 = c())
+
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "Basic_GLM", trainPreds)
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "C5_TREE_MODEL", predict(C5_TREE_MODEL, trainFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "C5_IMP8_FEATURES", predict(C5_IMP_FEATURES, trainFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "CART_BASIC", predict(CART_BASIC, trainFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "CART_CP_TUNED", predict(CART_CP_TUNED, trainFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "GLM_H2O_MODEL",  UDFGetH2OModelPreds(GLM_H2O_MODEL, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "GBM_CV",  UDFGetH2OModelPreds(GBM_CV, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "GBM_H2O_IMP9_FEATURES",  UDFGetH2OModelPreds(GBM_H2O_IMP_FEATURES, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "RF_CV",  UDFGetH2OModelPreds(RF_CV, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "RF_H2O_IMP11_FEATURES",  UDFGetH2OModelPreds(RF_H2O_IMP_FEATURES, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "RF_STACK",  UDFGetH2OModelPreds(RF_STACK, trainH2O))
+ModelMetrics <- UDFUpdateModelMeticsForTrain(ModelMetrics, "AUTO_ML",  UDFGetH2OModelPreds(AUTO_ML, trainH2O))
+
+```
+
+
+** Initialize Data frame to capture evauation metrics of each model on Train data sets **
+```{r}
+ModelMetrics <- data.frame(Model = c(), Type = c(), Accuracy = c(), Kappa = c(), 
+                           Recall = c(), Precission = c(), Specificity = c(), F1 = c())
+
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "Basic_GLM", valPreds)
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "C5_TREE_MODEL", predict(C5_TREE_MODEL, valFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "C5_IMP8_FEATURES", predict(C5_IMP_FEATURES, valFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "CART_BASIC", predict(CART_BASIC, valFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "CART_CP_TUNED", predict(CART_CP_TUNED, valFinal, type = "class"))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "GLM_H2O_MODEL",  UDFGetH2OModelPreds(GLM_H2O_MODEL, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "GBM_CV",  UDFGetH2OModelPreds(GBM_CV, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "GBM_H2O_IMP9_FEATURES",  UDFGetH2OModelPreds(GBM_H2O_IMP_FEATURES, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "RF_CV",  UDFGetH2OModelPreds(RF_CV, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "RF_H2O_IMP11_FEATURES",  UDFGetH2OModelPreds(RF_H2O_IMP_FEATURES, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "RF_STACK",  UDFGetH2OModelPreds(RF_STACK, validationH2O))
+ModelMetrics <- UDFUpdateModelMeticsForValidation(ModelMetrics, "AUTO_ML",  UDFGetH2OModelPreds(AUTO_ML, validationH2O))
+```
+
+
+
+## Shutdown H2O Clusters
+
+```{r}
+#h2o.shutdown(prompt = FALSE)
+```
+
+
+
+
