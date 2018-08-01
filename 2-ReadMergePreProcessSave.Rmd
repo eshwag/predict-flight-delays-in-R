@@ -1,0 +1,529 @@
+---
+title: "PHD: Read Aggregate & Merge for Train & Test data sets"
+author: "Batch39: 1843 - Gayathri Eshwarappa"
+date: "Jul 2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+# Read Aggregate Merge Weather data with Train & Test data
+
+## Read and Understand data
+* Read Train & Test data provided as trainDT & testDT
+* Read AllStationsData provided as allStaionDT
+* Iteratively read & merge files in 2004 folder as
+    1. trainWeatherDT if fileName contains "hourly"
+    2. trainPrecipDT if fileName contains  "hdp"
+
+```{r}
+weatherDataPath <- "./DataFiles/weatherdata"
+fileNames <- dir(weatherDataPath, full.names=T, recursive=T, all.files=T)
+
+trainDT <- fread(input="./DataFiles/Train.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+testDT <- fread(input="./DataFiles/Test.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+
+# Creating a copy of test Flightnumbers required for creating submission file.
+testFlightNumber <- testDT[, .(FlightNumber)]
+
+allStaionDT <- UDFReadWeatherData(fileNames, 'AllStationsData', NA, '|')
+trainWeatherDT <- UDFReadWeatherData(fileNames, '2004', 'hourly', ',')
+trainPrecipDT <- UDFReadWeatherData(fileNames, '2004', 'hpd', ',')
+testWeatherDT <- UDFReadWeatherData(fileNames, '2005', 'hourly', ',')
+testPrecipDT <- UDFReadWeatherData(fileNames, '2005', 'hpd', ',')
+
+rm(weatherDataPath, fileNames)
+```
+
+**Verify if train & test weather data are loaded correctly**
+
+```{r}
+toString(unique(trainWeatherDT[, .(substr(YearMonthDay, 1, 4))])) # Train Weather data should only have 2004 
+toString(unique(trainPrecipDT[, .(substr(YearMonthDay, 1, 4))])) # Train precipitation data should only have 2004 
+toString(unique(testWeatherDT[, .(substr(YearMonthDay, 1, 4))])) # Test Weather should only have 2004
+toString(unique(testPrecipDT[, .(substr(YearMonthDay, 1, 4))])) # Test precipitation data should only have 2004
+
+```
+
+**Convert date columns to appropriate datetime objects using lubridate package**
+```{r}
+trainWeatherDT[, RecordedDateTime := UDFMakeDateTimeFromString(YearMonthDay, Time)]
+testWeatherDT[, RecordedDateTime := UDFMakeDateTimeFromString(YearMonthDay, Time)]
+trainPrecipDT[, RecordedDateTime := UDFMakeDateTimeFromString(YearMonthDay, Time)]
+testPrecipDT[, RecordedDateTime := UDFMakeDateTimeFromString(YearMonthDay, Time)]
+
+trainDT[, ScheduledDepDateTime := UDFMakeDateTimeFromIndComponents(Year, Month, DayofMonth, ScheduledDepTime)]
+trainDT[, ScheduledArrDateTime := UDFMakeDateTimeFromIndComponents(Year, Month, DayofMonth, ScheduledArrTime)]
+trainDT[, ActualArrDateTime := dmy_hm(ActualArrivalTimeStamp)]
+
+testDT[, ScheduledDepDateTime := UDFMakeDateTimeFromIndComponents(Year, Month, DayofMonth, ScheduledDepTime)]
+testDT[, ScheduledArrDateTime := UDFMakeDateTimeFromIndComponents(Year, Month, DayofMonth, ScheduledArrTime)]
+
+
+# Drop notRequired columns from DT
+trainWeatherDT[, c("YearMonthDay", "Time") := NULL]
+testWeatherDT[, c("YearMonthDay", "Time") := NULL]
+trainPrecipDT[, c("YearMonthDay", "Time") := NULL]
+testPrecipDT[, c("YearMonthDay", "Time") := NULL]
+
+trainDT[, c("Year", "ScheduledDepTime", "ScheduledArrTime", "ActualArrivalTimeStamp") := NULL]
+testDT[, c("Year", "ScheduledDepTime", "ScheduledArrTime") := NULL]
+
+```
+
+
+**Adding new datetime column RecordedTimeToNearestHour, which is rounding recorded time to nearest hour**
+```{r}
+
+roundBy <- "12 hours"
+
+trainWeatherDT[, RecordedTimeToNearestHour := round_date(RecordedDateTime, unit=roundBy)]
+testWeatherDT[, RecordedTimeToNearestHour := round_date(RecordedDateTime, unit=roundBy)]
+
+trainPrecipDT[, RecordedTimeToNearestHour := round_date(RecordedDateTime, unit=roundBy)]
+testPrecipDT[, RecordedTimeToNearestHour := round_date(RecordedDateTime, unit=roundBy)]
+
+trainDT[, RecordedTimeToNearestHour_ORG := round_date(ScheduledDepDateTime, unit=roundBy)]
+testDT[, RecordedTimeToNearestHour_ORG := round_date(ScheduledDepDateTime, unit=roundBy)]
+
+trainDT[, RecordedTimeToNearestHour_DST := round_date(ScheduledArrDateTime, unit=roundBy)]
+testDT[, RecordedTimeToNearestHour_DST := round_date(ScheduledArrDateTime, unit=roundBy)]
+```
+
+
+##Derive target variable FlightDelayStatus in Train Data
+
+**Take difference of converted  ScheduledArrDateTime & ActualArrDateTime in minutes. If difference in minutes > 15 then FlightDelayStatus is Yes, else No**
+```{r}
+trainDT[, FlightDelayInMins := round(difftime(ymd_hms(ActualArrDateTime), ymd_hms(ScheduledArrDateTime),  unit="mins"), 0)]
+trainDT[, FlightDelayStatus := ifelse(FlightDelayInMins > 15, "Yes", "No")]
+
+trainDT[, c("ActualArrDateTime", "FlightDelayInMins") := NULL]
+
+#Check count of Flight Delay Status
+table(trainDT$FlightDelayStatus)
+
+```
+
+
+## Merge All station data to train & test Data tables
+First let us Convert All Station data to appropriate types as per details provided in Attribute_Information.pdf
+
+* TimeZone is numeric values which when added to Local standard time gives quivalent GMT 
+* Few rows in TimeZone has character values as explained below
+* Alaska-Hawaii timezone = -10 from UTC Standard 
+* Bering Standard timezone = 11 from UTC Standard
+* Eastern Standard timezone = -5 from UTC Standard
+* Yukon Standard timezone = -9 from UTC Standard
+```{r}
+allStaionDT[TimeZone == "Alaska-Hawaii", TimeZone := "-10" ]
+allStaionDT[TimeZone == "Bering Standard", TimeZone := "+10" ]
+allStaionDT[TimeZone == "Eastern Standard", TimeZone := "-5" ]
+allStaionDT[TimeZone == "Yukon Standard", TimeZone := "-9" ]
+allStaionDT[, TimeZone := str_replace(TimeZone, "\\+", "")]
+
+allStnNumColumns <- c("GroundHeight", "StationHeight", "BarometerHeight", "Latitude", "Longitude", "TimeZone")
+allStaionDT <- UDFConvertFeaturesToNumeric(allStaionDT, allStnNumColumns)
+
+# Let us make sure the conversion happened correctly
+str(allStaionDT)
+rm(allStnNumColumns)
+```
+
+
+**Merge allStation data to Train & Test data, once for Origin and again for Destination**
+```{r}
+orgColNames <- c()
+dstColNames <- c()
+for(col in colnames(allStaionDT)){
+  orgColNames <- c(orgColNames, ifelse(col == "AirportID", "Origin", paste0(col, "_ORG")))
+  dstColNames <- c(dstColNames, ifelse(col == "AirportID", "Destination", paste0(col, "_DST")))
+}
+
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, allStaionDT, orgColNames)
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, allStaionDT, dstColNames)
+
+testDT <- UDFLeftOuterMergeDataTables(testDT, allStaionDT, orgColNames)
+testDT <- UDFLeftOuterMergeDataTables(testDT, allStaionDT, dstColNames)
+
+#Remove transit variables to clear up space
+rm(allStaionDT, col, orgColNames, dstColNames)
+```
+
+
+
+
+## Pre-Process, aggregate & Merge Weather Data
+
+**There are many records in weather data which are not required, so lets filter only for weather station ids that are present in Train & Test**
+```{r}
+
+trainWeatherDT[["WeatherStationID"]] <- as.integer(trainWeatherDT[["WeatherStationID"]])
+testWeatherDT[["WeatherStationID"]] <- as.integer(testWeatherDT[["WeatherStationID"]])
+
+trainUniqueWSID <- unique(rbindlist(list(trainDT[, .(WeatherStationID_ORG)], trainDT[, .(WeatherStationID_DST)])))
+trainWeatherDT <- UDFRightOuterMergeDataTables(trainWeatherDT, trainUniqueWSID, "WeatherStationID")
+
+testUniqueWSID <- unique(rbindlist(list(testDT[, .(WeatherStationID_ORG)], testDT[, .(WeatherStationID_DST)])))
+testWeatherDT <- UDFRightOuterMergeDataTables(testWeatherDT, testUniqueWSID, "WeatherStationID")
+
+rm(trainUniqueWSID, testUniqueWSID)
+```
+
+
+
+
+
+**Convert Weather $ precipitation data columns to appropriate datatypes as per details provided in Attribute_Information.pdf** 
+1. Visibility is numeric measured in statutet miles. Values has SM suffix so replace SM with blank and then convert
+2. DBT is dry bulb temperature measured in whole degree celcius 
+3. DewPointTemp is numeric measured in Degree celcius
+4. RelativeHumidityPercent is numeric measured in percent
+5. WindSpeed is numeric measured in knots.Some rows has special character "/", so replace it with blank before conversion
+6. WindGustValue is maximum 5-sec peak wind speed measured
+7. StationPressure is the pressure felt at that station or spot but not adjusted to an equivalent at sea level
+8. Sky Condition is categorical
+
+Note: WindDirection is given as numeric but Some values are "VRB" for WindDirection and by definition Variable Wind Direction may be reported in following instances: 
+* Wind speed is 6 knots or less, "VRB" may be used for direction. 
+* Wind direction varies by 60 degrees or more while average wind speed is greater than 6 knots.Example: 340V040 indicates wind variable between 340 and 040 degrees. Replacing VRB with 185 for now
+  
+```{r}
+# Checking for any non numeric values using unique function so that conversion does not result in NA values
+
+#unique(trainWeatherDT[, .(Visibility)][order(-Visibility)])
+#unique(testWeatherDT[, .(Visibility)][order(-Visibility)])
+#unique(trainWeatherDT[, .(DBT)][order(-DBT)])
+#unique(testWeatherDT[, .(DBT)][order(-DBT)])
+#unique(trainWeatherDT[, .(DewPointTemp)][order(-DewPointTemp)])
+#unique(testWeatherDT[, .(DewPointTemp)][order(-DewPointTemp)])
+#unique(trainWeatherDT[, .(RelativeHumidityPercent)][order(-RelativeHumidityPercent)])
+#unique(testWeatherDT[, .(RelativeHumidityPercent)][order(-RelativeHumidityPercent)])
+#unique(trainWeatherDT[, .(WindSpeed)][order(-WindSpeed)])
+#unique(testWeatherDT[, .(WindSpeed)][order(-WindSpeed)])
+#unique(trainWeatherDT[, .(WindDirection)][order(-WindDirection)])
+#unique(testWeatherDT[, .(WindDirection)][order(-WindDirection)])
+#unique(trainWeatherDT[, .(WindGustValue)][order(-WindGustValue)])
+#unique(testWeatherDT[, .(WindGustValue)][order(-WindGustValue)])
+#unique(trainWeatherDT[, .(StationPressure)][order(-StationPressure)])
+#unique(testWeatherDT[, .(StationPressure)][order(-StationPressure)])
+
+trainWeatherDT[!is.na(Visibility), Visibility := str_replace(Visibility, "SM", "")]
+testWeatherDT[!is.na(Visibility), Visibility := str_replace(Visibility, "SM", "")]
+trainWeatherDT[!is.na(WindSpeed), WindSpeed := str_replace(WindSpeed, "\\/", "")]
+testWeatherDT[!is.na(WindSpeed), WindSpeed := str_replace(WindSpeed, "\\/", "")]
+trainWeatherDT[WindDirection == "VRB", WindDirection := "185"]
+testWeatherDT[WindDirection == "VRB", WindDirection := "185"]
+
+```
+
+
+
+
+
+**Convert Train Weather data features to appropriate data types**
+```{r}
+weatherDataNumColumns <- c("Visibility", "DBT", "DewPointTemp", "RelativeHumidityPercent", "WindSpeed", "WindDirection", "WindGustValue", "StationPressure")
+
+print("Train NA Counts before converstion")
+colSums(is.na(trainWeatherDT))
+
+trainWeatherDT <- UDFConvertFeaturesToNumeric(trainWeatherDT, weatherDataNumColumns)
+
+print("Train NA Counts after converstion")
+colSums(is.na(trainWeatherDT))
+```
+
+
+**Convert Test weather data features to appropriate data types**
+```{r}
+print("Test NA Counts before converstion")
+colSums(is.na(testWeatherDT))
+
+testWeatherDT <- UDFConvertFeaturesToNumeric(testWeatherDT, weatherDataNumColumns)
+
+print("Test NA Counts after converstion")
+colSums(is.na(testWeatherDT))
+rm(weatherDataNumColumns)
+```
+
+
+**Aggregate Train Weather data for same WeatherStationID & RecordedTime Rounded to Nearest hour**
+```{r}
+trainWeatherAggDT <- trainWeatherDT[, .(SkyConditions = unique(SkyConditions, na.rm = T)[1],
+                                        Visibility = round(mean(Visibility, ), 2),
+                                        DBT = round(mean(DBT, na.rm=T), 2),
+                                        DewPointTemp = round(mean(DewPointTemp, na.rm=T), 2),
+                                        RelativeHumidityPercent = round(mean(RelativeHumidityPercent, na.rm=T), 2),
+                                        WindSpeed = round(mean(WindSpeed, na.rm=T), 2),
+                                        WindDirection = round(mean(WindDirection, na.rm=T), 2),
+                                        WindGustValue = round(mean(WindGustValue, na.rm=T), 2),
+                                        StationPressure = round(mean(StationPressure, na.rm=T), 2)),
+                                    by = c("WeatherStationID", "RecordedTimeToNearestHour")]
+
+
+trainWeatherAggDT[is.nan(Visibility), Visibility := NA]
+trainWeatherAggDT[is.nan(DBT), DBT := NA]
+trainWeatherAggDT[is.nan(DewPointTemp), DewPointTemp := NA]
+trainWeatherAggDT[is.nan(RelativeHumidityPercent), RelativeHumidityPercent := NA]
+trainWeatherAggDT[is.nan(WindSpeed), WindSpeed := NA]
+trainWeatherAggDT[is.nan(WindDirection), WindDirection := NA]
+trainWeatherAggDT[is.nan(WindGustValue), WindGustValue := NA]
+trainWeatherAggDT[is.nan(StationPressure), StationPressure := NA]
+
+rm(trainWeatherDT)
+```
+
+
+
+
+**Aggregate Test Weather data for same WeatherStationID & RecordedTime Rounded to Nearest hour**
+```{r}
+testWeatherAggDT <- testWeatherDT[, .(SkyConditions = unique(SkyConditions, na.rm = T)[1],
+                                      Visibility = round(mean(Visibility, na.rm=T), 2),
+                                      DBT = round(mean(DBT, na.rm=T), 2),
+                                      DewPointTemp = round(mean(DewPointTemp, na.rm=T), 2),
+                                      RelativeHumidityPercent = round(mean(RelativeHumidityPercent, na.rm=T), 2),
+                                      WindSpeed = round(mean(WindSpeed, na.rm=T), 2),
+                                      WindDirection = round(mean(WindDirection, na.rm=T), 2),
+                                      WindGustValue = round(mean(WindGustValue, na.rm=T), 2),
+                                      StationPressure = round(mean(StationPressure, na.rm=T), 2)),
+                                  by = c("WeatherStationID", "RecordedTimeToNearestHour")]
+
+testWeatherAggDT[is.nan(Visibility), Visibility := NA]
+testWeatherAggDT[is.nan(DBT), DBT := NA]
+testWeatherAggDT[is.nan(DewPointTemp), DewPointTemp := NA]
+testWeatherAggDT[is.nan(RelativeHumidityPercent), RelativeHumidityPercent := NA]
+testWeatherAggDT[is.nan(WindSpeed), WindSpeed := NA]
+testWeatherAggDT[is.nan(WindDirection), WindDirection := NA]
+testWeatherAggDT[is.nan(WindGustValue), WindGustValue := NA]
+testWeatherAggDT[is.nan(StationPressure), StationPressure := NA]
+
+rm(testWeatherDT)
+```
+
+
+
+**Merge Aggregated Weather Data with respective Train & Test data**
+1. First merge for origin
+2. Again merge for destination
+```{r}
+orgWeatherColNames <- c()
+dstWeatherColNames <- c()
+for(col in colnames(trainWeatherAggDT)){
+  orgWeatherColNames <- c(orgWeatherColNames, paste0(col, "_ORG"))
+  dstWeatherColNames <- c(dstWeatherColNames, paste0(col, "_DST"))
+}
+
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, trainWeatherAggDT, orgWeatherColNames)
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, trainWeatherAggDT, dstWeatherColNames)
+
+testDT <- UDFLeftOuterMergeDataTables(testDT, testWeatherAggDT, orgWeatherColNames)
+testDT <- UDFLeftOuterMergeDataTables(testDT, testWeatherAggDT, dstWeatherColNames)
+
+rm(col, orgWeatherColNames, dstWeatherColNames, trainWeatherAggDT, testWeatherAggDT)
+```
+
+
+
+
+## Pre-Process, aggregate & Merge Precipitation Data 
+**There are many records in Precipitation data that are not required, so lets filter only for weather station ids that are present in Train & Test**
+```{r}
+trainUniqueWSID <- unique(rbindlist(list(trainDT[, .(WeatherStationID_ORG)], trainDT[, .(WeatherStationID_DST)])))
+trainPrecipDT <- UDFRightOuterMergeDataTables(trainPrecipDT, trainUniqueWSID, "WeatherStationID")
+
+testUniqueWSID <- unique(rbindlist(list(testDT[, .(WeatherStationID_ORG)], testDT[, .(WeatherStationID_DST)])))
+testPrecipDT <- UDFRightOuterMergeDataTables(testPrecipDT, testUniqueWSID, "WeatherStationID")
+
+rm(trainUniqueWSID, testUniqueWSID)
+```
+
+
+
+**Convert Train Precipitation features to appropriate data types**
+```{r}
+print("Train NA Counts before converstion")
+colSums(is.na(trainPrecipDT))
+trainPrecipDT[["HourlyPrecip"]] <- as.numeric(trainPrecipDT[["HourlyPrecip"]])
+print("Train NA Counts after converstion")
+colSums(is.na(trainPrecipDT))
+```
+
+
+**Convert Test Precipitation features to appropriate data types**
+```{r}
+print("Test NA Counts before converstion")
+colSums(is.na(testPrecipDT))
+testPrecipDT[["HourlyPrecip"]] <- as.numeric(testPrecipDT[["HourlyPrecip"]])
+print("Test NA Counts after converstion")
+colSums(is.na(testPrecipDT))
+```
+
+
+
+**Aggregate Precipitation data for same WeatherStationID & RecordedTimeToNearestHour**
+```{r}
+#Aggregation for train precip data
+trainPrecipAggDT <- trainPrecipDT[, .(HourlyPrecip = round(mean(HourlyPrecip, na.rm=T), 2)),
+                                    by = c("WeatherStationID", "RecordedTimeToNearestHour")]
+trainPrecipAggDT[is.nan(HourlyPrecip), HourlyPrecip := NA]
+
+#Aggreagation for test precip data
+testPrecipAggDT <- testPrecipDT[, .(HourlyPrecip = round(mean(HourlyPrecip, na.rm=T), 2)),
+                                    by = c("WeatherStationID", "RecordedTimeToNearestHour")]
+testPrecipAggDT[is.nan(HourlyPrecip), HourlyPrecip := NA]
+
+rm(trainPrecipDT, testPrecipDT)
+```
+
+
+**Merge Aggregated Precipitation Data with respective Train & Test data**  
+1. First merge for origin
+2. Again merge for destination
+```{r}
+orgPrecipColNames <- c()
+dstPrecipColNames <- c()
+for(col in colnames(trainPrecipAggDT)){
+  orgPrecipColNames <- c(orgPrecipColNames, paste0(col, "_ORG"))
+  dstPrecipColNames <- c(dstPrecipColNames, paste0(col, "_DST"))
+}
+
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, trainPrecipAggDT, orgPrecipColNames)
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, trainPrecipAggDT, dstPrecipColNames)
+
+testDT <- UDFLeftOuterMergeDataTables(testDT, testPrecipAggDT, orgPrecipColNames)
+testDT <- UDFLeftOuterMergeDataTables(testDT, testPrecipAggDT, dstPrecipColNames)
+
+rm(col, orgPrecipColNames, dstPrecipColNames, trainPrecipAggDT, testPrecipAggDT)
+```
+
+
+
+# Convert Features to appropriate Data Types
+
+
+
+```{r}
+columnsToGroupByOrg <- c("Origin", "RecordedTimeToNearestHour_ORG")
+columnsToGroupByDest <- c("Destination", "RecordedTimeToNearestHour_DST")
+columnsToMergeOrg <- c("AirportId", "RecordedTimeToNearestHour", "Departing")
+columnsToMergeDest <- c("AirportId", "RecordedTimeToNearestHour", "Arriving")
+
+DepartingFlights <- trainDT[, .(Departing = .N), by = columnsToGroupByOrg]
+colnames(DepartingFlights) <- columnsToMergeOrg
+ArrivingFlights <- trainDT[, .(Arriving = .N), by = columnsToGroupByDest]
+colnames(ArrivingFlights) <- columnsToMergeDest
+
+DepartingArrivingFlights <- merge(DepartingFlights, ArrivingFlights, 
+                               by = base::intersect(names(DepartingFlights), names(ArrivingFlights)), all = T)
+
+DepartingArrivingFlights[is.na(Departing), Departing := 0]
+DepartingArrivingFlights[is.na(Arriving), Arriving := 0]
+
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, DepartingArrivingFlights, 
+                                       c(columnsToGroupByOrg, "FlightsFromOrigin", "FlightsToOrigin"))
+
+trainDT <- UDFLeftOuterMergeDataTables(trainDT, DepartingArrivingFlights, 
+                                       c(columnsToGroupByDest, "FlightsFromDestination", "FlightsToDestination"))
+
+trainDT[, FlightsInOrigin := (FlightsFromOrigin+FlightsToOrigin)]
+trainDT[, FlightsInDestination := (FlightsFromDestination+FlightsToDestination)]
+
+trainDT[, c("FlightsFromOrigin", "FlightsToOrigin", "FlightsFromDestination", "FlightsToDestination") := NULL]
+
+rm(DepartingFlights, ArrivingFlights, DepartingArrivingFlights)
+```
+
+**Repeating above step for test**
+```{r}
+DepartingFlights <- testDT[, .(Departing = .N), by = columnsToGroupByOrg]
+colnames(DepartingFlights) <- columnsToMergeOrg
+ArrivingFlights <- testDT[, .(Arriving = .N), by = columnsToGroupByDest]
+colnames(ArrivingFlights) <- columnsToMergeDest
+
+DepartingArrivingFlights <- merge(DepartingFlights, ArrivingFlights, 
+                                  by = base::intersect(names(DepartingFlights), names(ArrivingFlights)), all = T)
+
+DepartingArrivingFlights[is.na(Departing), Departing := 0]
+DepartingArrivingFlights[is.na(Arriving), Arriving := 0]
+
+testDT <- UDFLeftOuterMergeDataTables(testDT, DepartingArrivingFlights, 
+                                       c(columnsToGroupByOrg, "FlightsFromOrigin", "FlightsToOrigin"))
+
+testDT <- UDFLeftOuterMergeDataTables(testDT, DepartingArrivingFlights, 
+                                       c(columnsToGroupByDest, "FlightsFromDestination", "FlightsToDestination"))
+
+testDT[, FlightsInOrigin := (FlightsFromOrigin+FlightsToOrigin)]
+testDT[, FlightsInDestination := (FlightsFromDestination+FlightsToDestination)]
+
+testDT[, c("FlightsFromOrigin", "FlightsToOrigin", "FlightsFromDestination", "FlightsToDestination") := NULL]
+
+rm(DepartingFlights, ArrivingFlights, DepartingArrivingFlights)
+rm(columnsToGroupByOrg, columnsToGroupByDest, columnsToMergeOrg, columnsToMergeDest)
+```
+
+
+*Month, DayOfWeek & DayofMonth are categorical, using lubridate package converting to categorical values
+```{r}
+trainDT[, Month := month(ScheduledDepDateTime, label = TRUE)]
+trainDT[, DayOfWeek := wday(ScheduledDepDateTime, label = TRUE)]
+trainDT[, DepHour:= hour(ScheduledDepDateTime)]
+trainDT[, DepMin:= minute(ScheduledDepDateTime)]
+trainDT[, ArrHour:= hour(ScheduledArrDateTime)]
+trainDT[, ArrMin:= minute(ScheduledArrDateTime)]
+
+testDT[, Month := month(ScheduledDepDateTime, label = TRUE)]
+testDT[, DayOfWeek := wday(ScheduledDepDateTime, label = TRUE)]
+testDT[, DepHour:= hour(ScheduledDepDateTime)]
+testDT[, DepMin:= minute(ScheduledDepDateTime)]
+testDT[, ArrHour:= hour(ScheduledArrDateTime)]
+testDT[, ArrMin:= minute(ScheduledArrDateTime)]
+
+hourInterval <- seq(0, 24, 2)
+trainDT[, DepHourBin:= findInterval(DepHour, hourInterval)]
+trainDT[, ArrHourBin:= findInterval(ArrHour, hourInterval)]
+testDT[, DepHourBin:= findInterval(DepHour, hourInterval)]
+testDT[, ArrHourBin:= findInterval(ArrHour, hourInterval)]
+
+minuteInterval <- seq(0, 60, 10)
+trainDT[, DepMinBin:= findInterval(DepMin, minuteInterval)]
+trainDT[, ArrMinBin:= findInterval(ArrMin, minuteInterval)]
+testDT[, DepMinBin:= findInterval(DepMin, minuteInterval)]
+testDT[, ArrMinBin:= findInterval(ArrMin, minuteInterval)]
+
+
+trainDT[["FlightDelayStatus"]] <- as.factor(trainDT[["FlightDelayStatus"]])
+catColumns <- c("Destination", "Origin", "Month", "DayofMonth", "DayOfWeek", "DepHourBin", "DepMinBin", "ArrHourBin", "ArrMinBin")
+trainDT <- UDFConvertFeaturesToFactor(trainDT, catColumns)
+testDT <- UDFConvertFeaturesToFactor(testDT, catColumns)
+
+rm(catColumns, hourInterval, minuteInterval)
+```
+
+**Drop Features that are not required**
+1. FlightNumber is an id column with unique values so not required
+2. WeatherStationID columns are ids for Origin & Destination hence not required
+3. RecordedTimeToNearestHour columns are derived columns to help with merging weather data, so not required after merging
+4. ScheduledDepDateTime & ScheduledArrDateTime are not required as required information from dates has been already extracted
+
+```{r}
+columsToDrop <- c("FlightNumber", "WeatherStationID_ORG", "WeatherStationID_DST", "RecordedTimeToNearestHour_ORG", "RecordedTimeToNearestHour_DST", "ScheduledDepDateTime", "ScheduledArrDateTime", "DepHour", "ArrHour", "DepMin", "ArrMin")
+
+trainDT[, c(columsToDrop) := NULL]
+testDT[, c(columsToDrop) := NULL]
+
+rm(columsToDrop)
+```
+  
+
+**Save Merged train & test files for future reference**
+```{r}
+write.csv(trainDT, "TrainAggMerged.csv", row.names = F)
+write.csv(testDT, "TestAggMerged.csv", row.names = F)
+```
+
+
+
+
