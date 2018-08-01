@@ -1,7 +1,5 @@
 ---
-title: "PHD: Handling Missing Values"
-author: "Batch39: 1843 - Gayathri Eshwarappa"
-date: "Jul 2018"
+title: "EDA & Feature Engineering"
 output:
   html_document:
     toc: yes
