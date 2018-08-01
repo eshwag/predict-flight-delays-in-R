@@ -1,7 +1,5 @@
 ---
-title: "PHD: Utility Functions Section"
-author: "Batch39: 1843 - Gayathri Eshwarappa"
-date: "Jul 2018"
+title: "Utility Functions Section"
 output:
   html_document:
     toc: yes
