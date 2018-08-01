@@ -1,0 +1,61 @@
+---
+title: "PHD: Data Visualization"
+author: "Batch39: 1843 - Gayathri Eshwarappa"
+date: "Jul 2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+# Univariate Analyiss of Numerical Features
+```{r fig.width=6}
+numColumns <- colnames(Filter(is.numeric, trainDT)) 
+catColumns <- colnames(Filter(is.factor, trainDT))
+
+for(col in numColumns){
+   plotV <- UDFPlotHistForNumFeature(trainDT, col)
+   print(plotV)
+}
+
+for(col in numColumns){
+   plotV <- UDFPlotDensityDistForNumFeature(trainDT, testDT, col)
+   print(plotV)
+}
+
+```
+
+# Univariate Analysis of categorical Features
+```{r}
+for(col in catColumns){
+   plotV <- UDFPlotBarPlotForCatFeature(trainDT, col)
+   print(plotV)
+}
+```
+
+# Bi-Variate analysis of Numerical Vs Categorical Features
+```{r}
+for(col in numColumns){
+  print(UDFPlotBoxPlotForCatVsNumFeature(trainDT, "FlightDelayStatus", col))
+}
+
+```
+
+
+
+
+# Bi-Variate analysis of Categorical Vs Target
+```{r}
+
+for(col in names(Filter(is.factor, trainDT))){
+  plotV <- UDFPlotBarPlotForCatVsCatTarget(trainDT, col, T)
+  print(plotV)
+}
+```
+
+
+
+
+
+
+
