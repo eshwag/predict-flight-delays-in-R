@@ -1,7 +1,5 @@
 ---
-title: "PHD: Build Models"
-author: "Batch39: 1843 - Gayathri Eshwarappa"
-date: "Jul 2018"
+title: "Model Building Section"
 output:
   html_document:
     toc: yes
