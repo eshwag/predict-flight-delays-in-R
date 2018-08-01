@@ -1,0 +1,775 @@
+---
+title: "PHD: Handling Missing Values"
+author: "Batch39: 1843 - Gayathri Eshwarappa"
+date: "Jul 2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+  
+# Read Aggregated & Merged Train & Test Data
+
+**Read previously merged train & test data from disk
+```{r}
+trainDT <- fread(input="TrainAggMerged.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+testDT <- fread(input="TestAggMerged.csv", sep=',', header=TRUE, na.strings=c("", " ", NA, "NA"))
+trainDT <- UDFConvertFeaturesToNumeric(trainDT, setdiff(colnames(trainDT), names(Filter(is.character, trainDT))))
+testDT <- UDFConvertFeaturesToNumeric(testDT, setdiff(colnames(testDT), names(Filter(is.character, testDT))))
+```
+
+# Handle missing values
+
+**Columns With NA Values are**
+```{r}
+UDFGetFeatureDetails(trainDT) %>% arrange(desc(NAValues))
+
+UDFGetFeatureDetails(testDT) %>% arrange(desc(NAValues))
+```
+
+
+##Combine Train and test Data
+
+*Combining Train & Test data to help with missing value imputation
+
+```{r}
+setcolorder(trainDT, c(setdiff(colnames(trainDT), "FlightDelayStatus"), "FlightDelayStatus"))
+testDT[, FlightDelayStatus := 'No']
+trainDT[, "DataType" := "Train"]
+testDT[, "DataType" := "Test"]
+
+combinedDT <- rbindlist(list(trainDT, testDT))
+
+```
+
+
+## Create helper tables for imputation
+```{r}
+
+getImputeHelperTable <- function(combinedDT, groupByCols){
+  
+  imputerOrg <- combinedDT[, .(ModeSkyConditions = unique(SkyConditions_ORG, na.rm = T)[1],
+                            AvgHourlyPrecip	= round(mean(HourlyPrecip_ORG, na.rm=T),2),
+                            AvgRelativeHumidityPercent = round(mean(RelativeHumidityPercent_ORG, na.rm=T),2),
+                            AvgDewPointTemp = round(mean(DewPointTemp_ORG, na.rm=T),2),
+                            AvgDBT = round(mean(DBT_ORG, na.rm=T),2),
+                            AvgStationPressure = round(mean(StationPressure_ORG, na.rm=T),2),
+                            AvgVisibility	= round(mean(Visibility_ORG, na.rm=T),2),
+                            AvgWindSpeed	= round(mean(WindSpeed_ORG, na.rm=T),2),
+                            AvgWindDirection = round(mean(WindDirection_ORG, na.rm=T),2),
+                            AvgWindGustValue =	round(mean(WindGustValue_ORG, na.rm=T),2)),
+                        by = c("Origin", groupByCols)]
+  
+  imputerOrg[is.nan(AvgHourlyPrecip), AvgHourlyPrecip := NA]
+  imputerOrg[is.nan(AvgRelativeHumidityPercent), AvgRelativeHumidityPercent := NA]
+  imputerOrg[is.nan(AvgDewPointTemp), AvgDewPointTemp := NA]
+  imputerOrg[is.nan(AvgDBT), AvgDBT := NA]
+  imputerOrg[is.nan(AvgStationPressure), AvgStationPressure := NA]
+  imputerOrg[is.nan(AvgVisibility), AvgVisibility := NA]
+  imputerOrg[is.nan(AvgWindSpeed), AvgWindSpeed := NA]
+  imputerOrg[is.nan(AvgWindDirection), AvgWindDirection := NA]
+  imputerOrg[is.nan(AvgWindGustValue), AvgWindGustValue := NA]
+  
+  imputerDst <- combinedDT[, .(ModeSkyConditions = unique(SkyConditions_DST, na.rm = T)[1],
+                            AvgHourlyPrecip	= round(mean(HourlyPrecip_DST, na.rm=T),2),
+                            AvgRelativeHumidityPercent = round(mean(RelativeHumidityPercent_DST, na.rm=T),2),
+                            AvgDewPointTemp = round(mean(DewPointTemp_DST, na.rm=T),2),
+                            AvgDBT = round(mean(DBT_DST, na.rm=T),2),
+                            AvgStationPressure = round(mean(StationPressure_DST, na.rm=T),2),
+                            AvgVisibility	= round(mean(Visibility_DST, na.rm=T),2),
+                            AvgWindSpeed	= round(mean(WindSpeed_DST, na.rm=T),2),
+                            AvgWindDirection = round(mean(WindDirection_DST, na.rm=T),2),
+                            AvgWindGustValue =	round(mean(WindGustValue_DST, na.rm=T),2)),
+                        by = c("Destination", groupByCols)]
+  
+  imputerDst[is.nan(AvgHourlyPrecip), AvgHourlyPrecip := NA]
+  imputerDst[is.nan(AvgRelativeHumidityPercent), AvgRelativeHumidityPercent := NA]
+  imputerDst[is.nan(AvgDewPointTemp), AvgDewPointTemp := NA]
+  imputerDst[is.nan(AvgDBT), AvgDBT := NA]
+  imputerDst[is.nan(AvgStationPressure), AvgStationPressure := NA]
+  imputerDst[is.nan(AvgVisibility), AvgVisibility := NA]
+  imputerDst[is.nan(AvgWindSpeed), AvgWindSpeed := NA]
+  imputerDst[is.nan(AvgWindDirection), AvgWindDirection := NA]
+  imputerDst[is.nan(AvgWindGustValue), AvgWindGustValue := NA]
+  
+  imputeHelperDT <- rbindlist(list(imputerOrg, imputerDst))
+  colnames(imputeHelperDT) <- replace(colnames(imputeHelperDT), 1, "AirportId")
+  
+  imputeHelperDT <- imputeHelperDT[, .(ModeSkyConditions = unique(ModeSkyConditions, na.rm = T)[1],
+                                       AvgHourlyPrecip	= round(mean(AvgHourlyPrecip, na.rm=T),2),
+                                       AvgRelativeHumidityPercent = round(mean(AvgRelativeHumidityPercent, na.rm=T),2),
+                                       AvgDewPointTemp = round(mean(AvgDewPointTemp, na.rm=T),2),
+                                       AvgDBT = round(mean(AvgDBT, na.rm=T),2),
+                                       AvgStationPressure = round(mean(AvgStationPressure, na.rm=T),2),
+                                       AvgVisibility	= round(mean(AvgVisibility, na.rm=T),2),
+                                       AvgWindSpeed	= round(mean(AvgWindSpeed, na.rm=T),2),
+                                       AvgWindDirection = round(mean(AvgWindDirection, na.rm=T),2),
+                                       AvgWindGustValue =	round(mean(AvgWindGustValue, na.rm=T),2)),
+                       by = c("AirportId", groupByCols)]
+  
+  
+  imputeHelperDT[is.nan(AvgHourlyPrecip), AvgHourlyPrecip := NA]
+  imputeHelperDT[is.nan(AvgRelativeHumidityPercent), AvgRelativeHumidityPercent := NA]
+  imputeHelperDT[is.nan(AvgDewPointTemp), AvgDewPointTemp := NA]
+  imputeHelperDT[is.nan(AvgDBT), AvgDBT := NA]
+  imputeHelperDT[is.nan(AvgStationPressure), AvgStationPressure := NA]
+  imputeHelperDT[is.nan(AvgVisibility), AvgVisibility := NA]
+  imputeHelperDT[is.nan(AvgWindSpeed), AvgWindSpeed := NA]
+  imputeHelperDT[is.nan(AvgWindDirection), AvgWindDirection := NA]
+  imputeHelperDT[is.nan(AvgWindGustValue), AvgWindGustValue := NA]
+  
+  return(imputeHelperDT)
+  
+}
+
+imputeHelperByIdMonthDay <- getImputeHelperTable(combinedDT, c("Month", "DayofMonth"))
+imputeHelperByIdMonth <- getImputeHelperTable(combinedDT, c("Month"))
+imputeHelperById <- getImputeHelperTable(combinedDT, c())
+
+```
+
+
+##Imputing missing values for HourlyPrecip for both Origin & Destination airportIds
+```{r}
+print(paste0("NA# for HourlyPrecip", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(HourlyPrecip_ORG, HourlyPrecip_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(HourlyPrecip_ORG) | is.na(HourlyPrecip_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgHourlyPrecip]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgHourlyPrecip]
+  combinedDT[is.na(HourlyPrecip_ORG) & Origin == org & Month == mon & DayofMonth == day, HourlyPrecip_ORG := imputeOrg]
+  combinedDT[is.na(HourlyPrecip_DST) & Destination == dst & Month == mon & DayofMonth == day, HourlyPrecip_DST := imputeDst]
+}
+print(paste0("NA# for HourlyPrecip", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(HourlyPrecip_ORG, HourlyPrecip_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(HourlyPrecip_ORG) | is.na(HourlyPrecip_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgHourlyPrecip]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgHourlyPrecip]
+  combinedDT[is.na(HourlyPrecip_ORG) & Origin == org & Month == mon, HourlyPrecip_ORG := imputeOrg]
+  combinedDT[is.na(HourlyPrecip_DST) & Destination == dst & Month == mon, HourlyPrecip_DST := imputeDst]
+}
+print(paste0("NA# for HourlyPrecip", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(HourlyPrecip_ORG, HourlyPrecip_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(HourlyPrecip_ORG) | is.na(HourlyPrecip_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgHourlyPrecip]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgHourlyPrecip]
+  combinedDT[is.na(HourlyPrecip_ORG) & Origin == org, HourlyPrecip_ORG := imputeOrg]
+  combinedDT[is.na(HourlyPrecip_DST) & Destination == dst, HourlyPrecip_DST := imputeDst]
+}
+print(paste0("NA# for HourlyPrecip", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(HourlyPrecip_ORG, HourlyPrecip_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$HourlyPrecip_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$HourlyPrecip_DST, na.rm = T), 2)
+combinedDT[is.na(HourlyPrecip_ORG), HourlyPrecip_ORG := imputeOrg]
+combinedDT[is.na(HourlyPrecip_DST), HourlyPrecip_DST := imputeDst]
+
+print(paste0("NA# for HourlyPrecip", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(HourlyPrecip_ORG, HourlyPrecip_DST)]))))
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+##Imputing missing values for RelativeHumidityPercent for both Origin & Destination airportIds
+```{r}
+print(paste0("NA# for RelativeHumidityPercent", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(RelativeHumidityPercent_ORG, RelativeHumidityPercent_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(RelativeHumidityPercent_ORG) | is.na(RelativeHumidityPercent_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgRelativeHumidityPercent]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgRelativeHumidityPercent]
+  combinedDT[is.na(RelativeHumidityPercent_ORG) & Origin == org & Month == mon & DayofMonth == day, RelativeHumidityPercent_ORG := imputeOrg]
+  combinedDT[is.na(RelativeHumidityPercent_DST) & Destination == dst & Month == mon & DayofMonth == day, RelativeHumidityPercent_DST := imputeDst]
+}
+print(paste0("NA# for RelativeHumidityPercent", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(RelativeHumidityPercent_ORG, RelativeHumidityPercent_DST)]))))
+
+
+imputeNaValuesDT <- unique(combinedDT[is.na(RelativeHumidityPercent_ORG) | is.na(RelativeHumidityPercent_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgRelativeHumidityPercent]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgRelativeHumidityPercent]
+  combinedDT[is.na(RelativeHumidityPercent_ORG) & Origin == org & Month == mon, RelativeHumidityPercent_ORG := imputeOrg]
+  combinedDT[is.na(RelativeHumidityPercent_DST) & Destination == dst & Month == mon, RelativeHumidityPercent_DST := imputeDst]
+}
+print(paste0("NA# for RelativeHumidityPercent", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(RelativeHumidityPercent_ORG, RelativeHumidityPercent_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(RelativeHumidityPercent_ORG) | is.na(RelativeHumidityPercent_DST), .(Origin, Destination)])
+  
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgRelativeHumidityPercent]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgRelativeHumidityPercent]
+  combinedDT[is.na(RelativeHumidityPercent_ORG) & Origin == org, RelativeHumidityPercent_ORG := imputeOrg]
+  combinedDT[is.na(RelativeHumidityPercent_DST) & Destination == dst, RelativeHumidityPercent_DST := imputeDst]
+}
+print(paste0("NA# for RelativeHumidityPercent", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(RelativeHumidityPercent_ORG, RelativeHumidityPercent_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$RelativeHumidityPercent_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$RelativeHumidityPercent_DST, na.rm = T), 2)
+combinedDT[is.na(RelativeHumidityPercent_ORG), RelativeHumidityPercent_ORG := imputeOrg]
+combinedDT[is.na(RelativeHumidityPercent_DST), RelativeHumidityPercent_DST := imputeDst]
+print(paste0("NA# for RelativeHumidityPercent", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(RelativeHumidityPercent_ORG, RelativeHumidityPercent_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+##Imputing missing values for DewPointTemp for both Origin & Destination airportId
+```{r}
+print(paste0("NA# for DewPointTemp", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DewPointTemp_ORG, DewPointTemp_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DewPointTemp_ORG) | is.na(DewPointTemp_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgDewPointTemp]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgDewPointTemp]
+  combinedDT[is.na(DewPointTemp_ORG) & Origin == org & Month == mon & DayofMonth == day, DewPointTemp_ORG := imputeOrg]
+  combinedDT[is.na(DewPointTemp_DST) & Destination == dst & Month == mon & DayofMonth == day, DewPointTemp_DST := imputeDst]
+}
+print(paste0("NA# for DewPointTemp", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DewPointTemp_ORG, DewPointTemp_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DewPointTemp_ORG) | is.na(DewPointTemp_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgDewPointTemp]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgDewPointTemp]
+  combinedDT[is.na(DewPointTemp_ORG) & Origin == org & Month == mon, DewPointTemp_ORG := imputeOrg]
+  combinedDT[is.na(DewPointTemp_DST) & Destination == dst & Month == mon, DewPointTemp_DST := imputeDst]
+}
+print(paste0("NA# for DewPointTemp", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DewPointTemp_ORG, DewPointTemp_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DewPointTemp_ORG) | is.na(DewPointTemp_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgDewPointTemp]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgDewPointTemp]
+  combinedDT[is.na(DewPointTemp_ORG) & Origin == org, DewPointTemp_ORG := imputeOrg]
+  combinedDT[is.na(DewPointTemp_DST) & Destination == dst, DewPointTemp_DST := imputeDst]
+}
+
+print(paste0("NA# for DewPointTemp", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DewPointTemp_ORG, DewPointTemp_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$DewPointTemp_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$DewPointTemp_DST, na.rm = T), 2)
+combinedDT[is.na(DewPointTemp_ORG), DewPointTemp_ORG := imputeOrg]
+combinedDT[is.na(DewPointTemp_DST), DewPointTemp_DST := imputeDst]
+print(paste0("NA# for DewPointTemp", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DewPointTemp_ORG, DewPointTemp_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for DBT for both Origin & Destination airportIds**
+```{r}
+print(paste0("NA# for DBT", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DBT_ORG, DBT_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DBT_ORG) | is.na(DBT_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgDBT]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgDBT]
+  combinedDT[is.na(DBT_ORG) & Origin == org & Month == mon & DayofMonth == day, DBT_ORG := imputeOrg]
+  combinedDT[is.na(DBT_DST) & Destination == dst & Month == mon & DayofMonth == day, DBT_DST := imputeDst]
+}
+print(paste0("NA# for DBT", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DBT_ORG, DBT_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DBT_ORG) | is.na(DBT_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgDBT]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgDBT]
+  combinedDT[is.na(DBT_ORG) & Origin == org & Month == mon, DBT_ORG := imputeOrg]
+  combinedDT[is.na(DBT_DST) & Destination == dst & Month == mon, DBT_DST := imputeDst]
+}
+print(paste0("NA# for DBT", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DBT_ORG, DBT_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(DBT_ORG) | is.na(DBT_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgDBT]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgDBT]
+  combinedDT[is.na(DBT_ORG) & Origin == org, DBT_ORG := imputeOrg]
+  combinedDT[is.na(DBT_DST) & Destination == dst, DBT_DST := imputeDst]
+}
+
+print(paste0("NA# for DBT", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DBT_ORG, DBT_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$DBT_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$DBT_DST, na.rm = T), 2)
+combinedDT[is.na(DBT_ORG), DBT_ORG := imputeOrg]
+combinedDT[is.na(DBT_DST), DBT_DST := imputeDst]
+print(paste0("NA# for DBT", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(DBT_ORG, DBT_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for StationPressure for both Origin & Destination airportIds**
+```{r}
+print(paste0("NA# for StationPressure", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(StationPressure_ORG, StationPressure_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(StationPressure_ORG) | is.na(StationPressure_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgStationPressure]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgStationPressure]
+  combinedDT[is.na(StationPressure_ORG) & Origin == org & Month == mon & DayofMonth == day, StationPressure_ORG := imputeOrg]
+  combinedDT[is.na(StationPressure_DST) & Destination == dst & Month == mon & DayofMonth == day, StationPressure_DST := imputeDst]
+}
+print(paste0("NA# for StationPressure", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(StationPressure_ORG, StationPressure_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(StationPressure_ORG) | is.na(StationPressure_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgStationPressure]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgStationPressure]
+  combinedDT[is.na(StationPressure_ORG) & Origin == org & Month == mon, StationPressure_ORG := imputeOrg]
+  combinedDT[is.na(StationPressure_DST) & Destination == dst & Month == mon, StationPressure_DST := imputeDst]
+}
+print(paste0("NA# for StationPressure", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(StationPressure_ORG, StationPressure_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(StationPressure_ORG) | is.na(StationPressure_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgStationPressure]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgStationPressure]
+  combinedDT[is.na(StationPressure_ORG) & Origin == org, StationPressure_ORG := imputeOrg]
+  combinedDT[is.na(StationPressure_DST) & Destination == dst, StationPressure_DST := imputeDst]
+}
+print(paste0("NA# for StationPressure", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(StationPressure_ORG, StationPressure_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$StationPressure_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$StationPressure_DST, na.rm = T), 2)
+combinedDT[is.na(StationPressure_ORG), StationPressure_ORG := imputeOrg]
+combinedDT[is.na(StationPressure_DST), StationPressure_DST := imputeDst]
+print(paste0("NA# for StationPressure", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(StationPressure_ORG, StationPressure_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+##Imputing missing values for Visibility for both Origin & Destination airportIds**
+```{r}
+print(paste0("NA# for Visibility", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(Visibility_ORG, Visibility_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(Visibility_ORG) | is.na(Visibility_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgVisibility]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgVisibility]
+  combinedDT[is.na(Visibility_ORG) & Origin == org & Month == mon & DayofMonth == day, Visibility_ORG := imputeOrg]
+  combinedDT[is.na(Visibility_DST) & Destination == dst & Month == mon & DayofMonth == day, Visibility_DST := imputeDst]
+}
+print(paste0("NA# for Visibility", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(Visibility_ORG, Visibility_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(Visibility_ORG) | is.na(Visibility_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgVisibility]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgVisibility]
+  combinedDT[is.na(Visibility_ORG) & Origin == org & Month == mon, Visibility_ORG := imputeOrg]
+  combinedDT[is.na(Visibility_DST) & Destination == dst & Month == mon, Visibility_DST := imputeDst]
+}
+print(paste0("NA# for Visibility", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(Visibility_ORG, Visibility_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(Visibility_ORG) | is.na(Visibility_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgVisibility]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgVisibility]
+  combinedDT[is.na(Visibility_ORG) & Origin == org, Visibility_ORG := imputeOrg]
+  combinedDT[is.na(Visibility_DST) & Destination == dst, Visibility_DST := imputeDst]
+}
+print(paste0("NA# for Visibility", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(Visibility_ORG, Visibility_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$Visibility_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$Visibility_DST, na.rm = T), 2)
+combinedDT[is.na(Visibility_ORG), Visibility_ORG := imputeOrg]
+combinedDT[is.na(Visibility_DST), Visibility_DST := imputeDst]
+print(paste0("NA# for Visibility", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(Visibility_ORG, Visibility_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for WindSpeed for both Origin & Destination airportIds**
+```{r}
+print(paste0("NA# for WindSpeed", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindSpeed_ORG, WindSpeed_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindSpeed_ORG) | is.na(WindSpeed_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgWindSpeed]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgWindSpeed]
+  combinedDT[is.na(WindSpeed_ORG) & Origin == org & Month == mon & DayofMonth == day, WindSpeed_ORG := imputeOrg]
+  combinedDT[is.na(WindSpeed_DST) & Destination == dst & Month == mon & DayofMonth == day, WindSpeed_DST := imputeDst]
+
+}
+print(paste0("NA# for WindSpeed", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindSpeed_ORG, WindSpeed_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindSpeed_ORG) | is.na(WindSpeed_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgWindSpeed]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgWindSpeed]
+  combinedDT[is.na(WindSpeed_ORG) & Origin == org & Month == mon, WindSpeed_ORG := imputeOrg]
+  combinedDT[is.na(WindSpeed_DST) & Destination == dst & Month == mon, WindSpeed_DST := imputeDst]
+}
+print(paste0("NA# for WindSpeed", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindSpeed_ORG, WindSpeed_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindSpeed_ORG) | is.na(WindSpeed_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgWindSpeed]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgWindSpeed]
+  combinedDT[is.na(WindSpeed_ORG) & Origin == org, WindSpeed_ORG := imputeOrg]
+  combinedDT[is.na(WindSpeed_DST) & Destination == dst, WindSpeed_DST := imputeDst]
+}
+print(paste0("NA# for WindSpeed", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindSpeed_ORG, WindSpeed_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$WindSpeed_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$WindSpeed_DST, na.rm = T), 2)
+combinedDT[is.na(WindSpeed_ORG), WindSpeed_ORG := imputeOrg]
+combinedDT[is.na(WindSpeed_DST), WindSpeed_DST := imputeDst]
+print(paste0("NA# for WindSpeed", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindSpeed_ORG, WindSpeed_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for WindDirection for both Origin & Destination airportIds
+
+```{r}
+print(paste0("NA# for WindDirection", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindDirection_ORG, WindDirection_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindDirection_ORG) | is.na(WindDirection_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgWindDirection]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgWindDirection]
+  combinedDT[is.na(WindDirection_ORG) & Origin == org & Month == mon & DayofMonth == day, WindDirection_ORG := imputeOrg]
+  combinedDT[is.na(WindDirection_DST) & Destination == dst & Month == mon & DayofMonth == day, WindDirection_DST := imputeDst]
+}
+print(paste0("NA# for WindDirection", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindDirection_ORG, WindDirection_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindDirection_ORG) | is.na(WindDirection_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgWindDirection]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgWindDirection]
+  combinedDT[is.na(WindDirection_ORG) & Origin == org & Month == mon, WindDirection_ORG := imputeOrg]
+  combinedDT[is.na(WindDirection_DST) & Destination == dst & Month == mon, WindDirection_DST := imputeDst]
+}
+print(paste0("NA# for WindDirection", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindDirection_ORG, WindDirection_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindDirection_ORG) | is.na(WindDirection_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgWindDirection]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgWindDirection]
+  combinedDT[is.na(WindDirection_ORG) & Origin == org, WindDirection_ORG := imputeOrg]
+  combinedDT[is.na(WindDirection_DST) & Destination == dst, WindDirection_DST := imputeDst]
+}
+print(paste0("NA# for WindDirection", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindDirection_ORG, WindDirection_DST)]))))
+
+##impute remaining NA values with "NR" i.e "Not Recorded"
+imputeOrg <- round(mean(combinedDT$WindDirection_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$WindDirection_DST, na.rm = T), 2)
+combinedDT[is.na(WindDirection_ORG), WindDirection_ORG := imputeOrg]
+combinedDT[is.na(WindDirection_DST), WindDirection_DST := imputeDst]
+print(paste0("NA# for WindDirection", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindDirection_ORG, WindDirection_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for WindGustValue for both Origin & Destination airportIds**
+```{r}
+print(paste0("NA# for WindGustValue", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindGustValue_ORG, WindGustValue_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindGustValue_ORG) | is.na(WindGustValue_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, AvgWindGustValue]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, AvgWindGustValue]
+  combinedDT[is.na(WindGustValue_ORG) & Origin == org & Month == mon & DayofMonth == day, WindGustValue_ORG := imputeOrg]
+  combinedDT[is.na(WindGustValue_DST) & Destination == dst & Month == mon & DayofMonth == day, WindGustValue_DST := imputeDst]
+}
+print(paste0("NA# for WindGustValue", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindGustValue_ORG, WindGustValue_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindGustValue_ORG) | is.na(WindGustValue_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, AvgWindGustValue]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, AvgWindGustValue]
+  combinedDT[is.na(WindGustValue_ORG) & Origin == org & Month == mon, WindGustValue_ORG := imputeOrg]
+  combinedDT[is.na(WindGustValue_DST) & Destination == dst & Month == mon, WindGustValue_DST := imputeDst]
+}
+print(paste0("NA# for WindGustValue", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindGustValue_ORG, WindGustValue_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(WindGustValue_ORG) | is.na(WindGustValue_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, AvgWindGustValue]
+  imputeDst <- imputeHelperById[AirportId == dst, AvgWindGustValue]
+  combinedDT[is.na(WindGustValue_ORG) & Origin == org, WindGustValue_ORG := imputeOrg]
+  combinedDT[is.na(WindGustValue_DST) & Destination == dst, WindGustValue_DST := imputeDst]
+}
+print(paste0("NA# for WindGustValue", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindGustValue_ORG, WindGustValue_DST)]))))
+
+imputeOrg <- round(mean(combinedDT$WindGustValue_ORG, na.rm = T), 2)
+imputeDst <- round(mean(combinedDT$WindGustValue_DST, na.rm = T), 2)
+combinedDT[is.na(WindGustValue_ORG), WindGustValue_ORG := imputeOrg]
+combinedDT[is.na(WindGustValue_DST), WindGustValue_DST := imputeDst]
+print(paste0("NA# for WindGustValue", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(WindGustValue_ORG, WindGustValue_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+```
+
+
+##Imputing missing values for SkyConditions for both Origin & Destination airportIds
+```{r}
+print(paste0("NA# for SkyConditions", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(SkyConditions_ORG, SkyConditions_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(SkyConditions_ORG) | is.na(SkyConditions_DST), .(Origin, Destination, Month, DayofMonth)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  day <- imputeNaValuesDT[i, DayofMonth]
+  imputeOrg <- imputeHelperByIdMonthDay[AirportId == org & Month == mon & DayofMonth == day, ModeSkyConditions]
+  imputeDst <- imputeHelperByIdMonthDay[AirportId == dst & Month == mon & DayofMonth == day, ModeSkyConditions]
+  combinedDT[is.na(SkyConditions_ORG) & Origin == org & Month == mon & DayofMonth == day, SkyConditions_ORG := imputeOrg]
+  combinedDT[is.na(SkyConditions_DST) & Destination == dst & Month == mon & DayofMonth == day, SkyConditions_DST := imputeDst]
+}
+print(paste0("NA# for SkyConditions", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(SkyConditions_ORG, SkyConditions_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(SkyConditions_ORG) | is.na(SkyConditions_DST), .(Origin, Destination, Month)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  mon <- imputeNaValuesDT[i, Month]
+  imputeOrg <- imputeHelperByIdMonth[AirportId == org & Month == mon, ModeSkyConditions]
+  imputeDst <- imputeHelperByIdMonth[AirportId == dst & Month == mon, ModeSkyConditions]
+  combinedDT[is.na(SkyConditions_ORG) & Origin == org & Month == mon, SkyConditions_ORG := imputeOrg]
+  combinedDT[is.na(SkyConditions_DST) & Destination == dst & Month == mon, SkyConditions_DST := imputeDst]
+}
+print(paste0("NA# for SkyConditions", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(SkyConditions_ORG, SkyConditions_DST)]))))
+
+imputeNaValuesDT <- unique(combinedDT[is.na(SkyConditions_ORG) | is.na(SkyConditions_DST), .(Origin, Destination)])
+for(i in 1:nrow(imputeNaValuesDT)){
+  org <- imputeNaValuesDT[i, Origin]
+  dst <- imputeNaValuesDT[i, Destination]
+  imputeOrg <- imputeHelperById[AirportId == org, ModeSkyConditions]
+  imputeDst <- imputeHelperById[AirportId == dst, ModeSkyConditions]
+  combinedDT[is.na(SkyConditions_ORG) & Origin == org, SkyConditions_ORG := imputeOrg]
+  combinedDT[is.na(SkyConditions_DST) & Destination == dst, SkyConditions_DST := imputeDst]
+}
+print(paste0("NA# for SkyConditions", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(SkyConditions_ORG, SkyConditions_DST)]))))
+
+##impute remaining NA values with "NR" i.e "Not Recorded"
+imputeOrg <- "NR"
+imputeDst <- "NR"
+combinedDT[is.na(SkyConditions_ORG), SkyConditions_ORG := imputeOrg]
+combinedDT[is.na(SkyConditions_DST), SkyConditions_DST := imputeDst]
+print(paste0("NA# for SkyConditions", c("_ORG: ", "_DST: "), colSums(is.na(combinedDT[, .(SkyConditions_ORG, SkyConditions_DST)]))))
+
+rm(i, imputeNaValuesDT, imputeOrg, imputeDst, org, dst, mon, day)
+rm(imputeHelperByIdMonthDay, imputeHelperByIdMonth, imputeHelperById)
+```
+
+
+
+## Segregate Train & test from combined data
+```{r}
+trainDT <- combinedDT[DataType=="Train", ]
+testDT <- combinedDT[DataType=="Test", ]
+testDT$FlightDelayStatus <- NULL
+trainDT$DataType <- NULL
+testDT$DataType <-  NULL
+rm(combinedDT)
+```
+
+
+
+
+# Feature Engineering
+
+1. Derive Speed of the flight by Distance/time in hours
+```{r}
+trainDT[, TravelTimeInHours:= round(as.double(ScheduledTravelTime/60), 2)]
+testDT[, TravelTimeInHours:= round(as.double(ScheduledTravelTime/60), 2)]
+
+trainDT[, SpeedOfTheFlight := round(as.double(Distance/TravelTimeInHours), 2)]
+testDT[, SpeedOfTheFlight := round(as.double(Distance/TravelTimeInHours), 2)]
+
+trainDT[, c("ScheduledTravelTime") := NULL]
+testDT[, c("ScheduledTravelTime"):= NULL]
+
+```
+
+2. Derive TimeZone difference feature taking the difference TimeZone_ORG & TimeZone_DST
+```{r}
+
+trainDT[, TimeZoneDiff := abs(TimeZone_ORG - TimeZone_DST)]
+testDT[, TimeZoneDiff := abs(TimeZone_ORG - TimeZone_DST)]
+
+trainDT[, c("TimeZone_ORG", "TimeZone_DST") := NULL]
+testDT[, c("TimeZone_ORG", "TimeZone_DST") := NULL]
+
+```
+
+
+3. Visibilty & RelativeHumidityPercent difference between Origin & Destination
+```{r}
+
+trainDT[, VisibilityDiff := (Visibility_ORG-Visibility_DST)]
+trainDT[, RelativeHumidityPercentDiff := (RelativeHumidityPercent_ORG-RelativeHumidityPercent_DST)]
+
+testDT[, VisibilityDiff := (Visibility_ORG-Visibility_DST)]
+testDT[, RelativeHumidityPercentDiff := (RelativeHumidityPercent_ORG-RelativeHumidityPercent_DST)]
+
+str(trainDT)
+
+```
+
+4. Pre-processing SkyCondition features
+```{r}
+processSkyCondition <- function(skyCond){
+  skyCond <- str_sort(str_split(skyCond, " ")[[1]])
+  skyCond <- gsub("[0-9]", "", skyCond)
+  skyCond <- unique(skyCond)
+  skyCond <- gsub(" ", "", paste(skyCond, collapse=''), fixed = T)
+  return(skyCond)
+}
+
+length(unique(trainDT$SkyConditions_ORG))
+length(unique(trainDT$SkyConditions_DST))
+length(unique(testDT$SkyConditions_ORG))
+length(unique(testDT$SkyConditions_DST))
+
+trainDT$SkyConditions_ORG <- sapply(trainDT$SkyConditions_ORG, processSkyCondition)
+trainDT$SkyConditions_DST <- sapply(trainDT$SkyConditions_DST, processSkyCondition)
+testDT$SkyConditions_ORG <- sapply(testDT$SkyConditions_ORG, processSkyCondition)
+testDT$SkyConditions_DST <- sapply(testDT$SkyConditions_DST, processSkyCondition)
+
+length(unique(trainDT$SkyConditions_ORG))
+length(unique(trainDT$SkyConditions_DST))
+length(unique(testDT$SkyConditions_ORG))
+length(unique(testDT$SkyConditions_DST))
+
+```
+
+
+
+# Exploratory Data Analysis
+
+*Converting features to appropriate data types
+```{r}
+trainDT <- UDFConvertFeaturesToFactor(trainDT, setdiff(colnames(trainDT), names(Filter(is.numeric, trainDT))))
+testDT <- UDFConvertFeaturesToFactor(testDT, setdiff(colnames(testDT), names(Filter(is.numeric, testDT))))
+```
+
+**Finding Correlation of numeric attributes**
+```{r}
+numColumns <- names(Filter(is.numeric, trainDT)); 
+corrMatrix <- cor(trainDT[, ..numColumns])
+corrNumericDF <- UDFFlattenCorrMatrix(corrMatrix)
+
+#Visaulize correlation matrix
+#corrplot(corrMatrix, type = "lower", order = "hclust", tl.srt = 20, tl.col = "black")
+
+corrNumericDF %>% filter(Corelation > 0.7 | Corelation < -0.7)
+
+rm(numColumns, corrMatrix)
+```
+
+**Find categorical correlation using cramer value**
+```{r}
+#corrCategoricalDF <- UDFGetChisqCramerValForCatFeatures(trainDT, withTarget = F)
+UDFGetChisqCramerValForCatFeatures(trainDT, withTarget = T)
+
+str(trainDT)
+```
+
+**There is high correlation b/n all station columns & weather data so drpping columns from allStationData**
+```{r}
+columsToDrop <- c("GroundHeight_ORG", "GroundHeight_DST","StationHeight_ORG", "StationHeight_DST", "BarometerHeight_ORG","BarometerHeight_DST", "Latitude_ORG", "Latitude_DST", "Distance", "Origin", "Destination")
+
+trainDT[, c(columsToDrop) := NULL]
+testDT[, c(columsToDrop) := NULL]
+
+rm(columsToDrop)
+```
+
+
+# Save Final Data modelling 
+
+**Save pre-processed, imputed train & test files for future reference**
+```{r}
+write.csv(trainDT, "TrainFinal.csv", row.names = F)
+write.csv(testDT, "TestFinal.csv", row.names = F)
+```
+
+
+
+
+
+
+
