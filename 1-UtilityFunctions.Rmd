@@ -1,0 +1,324 @@
+---
+title: "PHD: Utility Functions Section"
+author: "Batch39: 1843 - Gayathri Eshwarappa"
+date: "Jul 2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+# Set environment & create User defined functions
+```{r}
+rm(list = ls(all=T))
+setwd("~/PHD_1843B39")
+```
+
+
+## Check if required packages are already installed, if not install them
+```{r}
+requiredPackages <- c("data.table","ggplot2","tidyverse","h2o","caret","DMwR","rpart","rpart.plot","randomForest","xgboost","dummies","lubridate","corrplot","C50","vcd", "mice", "ROSE", "car", "ROCR")
+
+installedPackages <- installed.packages()[, "Package"]
+newPackages <- setdiff(requiredPackages, installedPackages)
+  if(length(newPackages)){
+    install.packages(newPackages)
+  }
+
+#Remove no-longer required variables from the environmnet to clear up space
+rm(requiredPackages, installedPackages, newPackages)
+```
+
+## Load Required Libraies
+```{r}
+library(data.table)
+library(ggplot2)
+library(tidyverse)
+library(h2o)
+library(caret)
+library(DMwR)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(xgboost)
+library(dummies)
+library(lubridate)
+library(corrplot)
+library(C50)
+library(vcd)
+library(mice)
+library(ROSE)
+library(dplyr)
+library(e1071)
+library(car)
+library(ROCR)
+```
+
+## Utility functions for ease with building models
+```{r}
+UDFReadWeatherData <- function(fileNames, type, trainOrTest, sep){
+  outputDT <- NULL
+  for(i in 1:length(fileNames)){
+    isType <- str_detect(fileNames[i], type)
+    isTrainOrTest <- ifelse(is.na(trainOrTest), T, str_detect(fileNames[i], trainOrTest))
+    
+    if(isType & isTrainOrTest){
+      tempDT <- fread(input=fileNames[i], sep=sep, header=T, na.strings=c("", " ", NA, "NA", "."))
+      outputDT <- rbindlist(list(outputDT, tempDT))
+    }
+  }
+  return(outputDT)
+}
+
+UDFMakeDateTimeFromString <- function(YearMonthDay, time){
+  year <- ifelse(is.na(YearMonthDay), 1900, as.integer(substr(YearMonthDay,1,4)))
+  month <- ifelse(is.na(YearMonthDay), 1, as.integer(substr(YearMonthDay,5,6)))
+  day <- ifelse(is.na(YearMonthDay), 1, as.integer(substr(YearMonthDay,7,8)))  
+  hour <- ifelse(is.na(time), 0, as.integer(time) %/% 100)
+  min <- ifelse(is.na(time), 0, as.integer(time) %% 100)
+  make_datetime(year, month, day, hour, min)
+}
+
+UDFMakeDateTimeFromIndComponents <- function(year, month, day, time){
+  year <- ifelse(is.na(year), 1900, as.integer(year))
+  month <- ifelse(is.na(month), 1, as.integer(month))
+  day <- ifelse(is.na(day), 1, as.integer(day))  
+  hour <- ifelse(is.na(time), 0, as.integer(time) %/% 100)
+  min <- ifelse(is.na(time), 0, as.integer(time) %% 100)
+  make_datetime(year, month, day, hour, min)
+}
+
+UDFLeftOuterMergeDataTables <- function(inputDT, dtToMerge, columnNames){
+  colnames(dtToMerge) <- columnNames
+  mergedDT <- merge(inputDT, dtToMerge, sort = FALSE,
+                    by=base::intersect(names(inputDT), names(dtToMerge)), all.x=T)
+  return(mergedDT)
+}
+
+UDFRightOuterMergeDataTables <- function(inputDT, dtToMerge, columnNames){
+  colnames(dtToMerge) <- columnNames
+  mergedDT <- merge(inputDT, dtToMerge, sort = FALSE,
+                    by=base::intersect(names(inputDT), names(dtToMerge)), all.y=T)
+  return(mergedDT)
+}
+
+UDFConvertFeaturesToNumeric <- function(inputDT, colNames){
+  for(col in colNames){
+    inputDT[[col]] <- as.numeric(as.character(inputDT[[col]]))
+  }
+  return(inputDT)
+}
+
+UDFConvertFeaturesToFactor <- function(inputDT, colNames){
+  for(col in colNames){
+    inputDT[[col]] <- as.factor(as.character(inputDT[[col]]))
+  }
+  return(inputDT)
+}
+
+UDFPlotRoc <- function(model, trues){
+  predsProb <- predict(model, type = "response")
+  predictionObj <- prediction(predictions=predsProb, labels=trues)
+  perfObj <- performance(prediction.obj = predictionObj, measure = "tpr", x.measure = "fpr")
+  plot(perfObj, colorize = T, print.cutoffs.at=seq(0, 1, 0.05))
+}
+
+UDFGetAucValue <- function(model, trues){
+  predsProb <- predict(model, type = "response")
+  predictionObj <- prediction(predictions=predsProb, labels=trues)
+  perfObj <- performance(prediction.obj = predictionObj, measure = "auc")
+  perfObj@y.values[[1]]
+}
+
+# A generic function to calculate performance metrics for classification model such as -> Accuracy, Recall, Precission, Specificity, F1
+UDFGetModelMetrics <- function(model, type, trues, preds){
+  cm <- confusionMatrix(data=preds, reference=trues, positive="Yes")
+  evalMetrics <- data.frame(Model=model, 
+                            Type=type,
+                            Accuracy=cm$overall[["Accuracy"]],
+                            Kappa=cm$overall[["Kappa"]], 
+                            Recall=cm$byClass[["Recall"]], 
+                            Precission=cm$byClass[["Precision"]], 
+                            Specificity=cm$byClass[["Specificity"]], 
+                            F1=cm$byClass[["F1"]])
+  return(evalMetrics)
+}
+
+# A generic function for predicting target variable on H2O models
+UDFGetH2OModelPreds <- function(model, data){
+  h2OPreds <- as.data.frame(h2o.predict(model, data))
+  h2OPreds$predict
+}
+
+# A generic function to create test submission file for uploading in grader
+UDFCreateTestSubmissionFile <- function(testPreds, fileName){
+  submissionDF <- data.frame(FlightNumber=testFlightNumber$FlightNumber, FlightDelayStatus=testPreds)
+  write.csv(submissionDF, file=fileName, row.names=F)
+}
+
+# This is a generic function to flatten correlation matrix details into DF for easier analysis when there are many numeric values
+UDFFlattenCorrMatrix <- function(corrMatrix){
+  lt <- lower.tri(corrMatrix)
+  corrDF <- data.frame(Row=rownames(corrMatrix)[row(corrMatrix)[lt]],
+                       Column=rownames(corrMatrix)[col(corrMatrix)[lt]],
+                       Corelation=(corrMatrix)[lt])
+  return(arrange(corrDF, desc(Corelation)))
+}
+
+# This is a generic function to get Chi-Square independence test & Cramer Value(re-scaled chisq.test) for categorical features. 
+
+UDFGetChisqCramerValForCatFeatures <- function(inputDT, withTarget=TRUE){
+  outputDF <- data.frame(ColumnOne=c(), ColumnTwo=c(), ChisqPValue=c(), CramerValue=c())
+  catColumns <- colnames(Filter(is.factor, inputDT))
+  
+  target = "FlightDelayStatus"
+  if(withTarget){
+    columnList = target
+  } else{
+    catColumns <- setdiff(catColumns, target)
+    columnList = catColumns
+  }
+  
+  for(col1 in columnList){
+    catColumns <- setdiff(catColumns, col1)
+    for(col2 in catColumns){
+      chisqVal <- chisq.test(inputDT[[col1]], inputDT[[col2]])
+      assoStatResults <- assocstats(table(inputDT[[col1]], inputDT[[col2]]))
+      cramerVal <- round((assoStatResults$cramer) * 100, 3)
+      cramerVal <- ifelse(is.nan(cramerVal), 0, cramerVal)
+      record <- data.frame(ColumnOne=col1, ColumnTwo=col2, 
+                           ChisqPStat=format.pval(chisqVal$p.value), 
+                           CramerValue=cramerVal)
+      outputDF <- rbind(outputDF, record)
+    }
+  }
+  
+  return(arrange(outputDF, desc(CramerValue)))
+}
+
+
+# This is a generic Function to get details of the individual columns in the data table such as, 
+# 1. Unique values distribution, 
+# 2. Percentage of NAs 
+# These details will enable us in deciding if column should be converted to factor/to be removed if more NAs
+
+UDFGetFeatureDetails <- function(inputDT){
+  
+  outputDF <- data.frame(ColumnName=c(), 
+                         Class= c(), 
+                         UniqueValues=c(), 
+                         UniqueValuesPercent=c(),
+                         NAValues=c(), 
+                         NAValuesPercent=c())
+  n <- nrow(inputDT)
+  
+  for(colName in colnames(inputDT))
+  {
+    column <- inputDT[[colName]]
+    columnDetails <- data.frame(ColumnName=colName, 
+                                Class=class(column), 
+                                UniqueValues=length(unique(column)), 
+                                UniqueValuesPercent=round((length(unique(column))/n)*100, 3), 
+                                NAValues=sum(is.na(column)), 
+                                NAValuesPercent=round((sum(is.na(column))/n)*100, 3)) 
+    outputDF <- rbind(outputDF, columnDetails)
+  }
+  
+  return(outputDF)
+}
+
+UDFGetNAColumnsAboveThreshold <- function(inputDT, threshold = 30){
+  featureDetailsDF <- UDFGetFeatureDetails(inputDT)
+  NAColumsDT <- featureDetailsDF %>% filter(NAValuesPercent > threshold) %>% select(ColumnName)
+  return(as.character(NAColumsDT[, 1]))
+}
+
+# Function to update metrics for train dataset
+UDFUpdateModelMeticsForTrain <- function(ModelMetricsDF, modelName, trainPreds){
+  
+  trainMetrics <- UDFGetModelMetrics(modelName, "Train", 
+                                      trues=trainFinal$FlightDelayStatus, 
+                                      preds=trainPreds)
+  ModelMetricsDF <- rbind(ModelMetricsDF, trainMetrics)
+}
+
+# Function to update metrics for Validation dataset
+UDFUpdateModelMeticsForValidation <- function(ModelMetricsDF, modelName, validationPreds){
+  
+  validationMetrics <- UDFGetModelMetrics(modelName, "Validation", 
+                                           trues=valFinal$FlightDelayStatus, 
+                                           preds=validationPreds)
+  ModelMetricsDF <- rbind(ModelMetricsDF, validationMetrics)
+}
+
+```
+
+##Helper Functions for Visualization
+```{r}
+
+#Histogram for Numerical Feature
+UDFPlotHistForNumFeature <- function(data, numCol){
+  colSkewness <- textGrob(paste("Skewness: ", round(skewness(data[[numCol]], na.rm = T), 2)), x=0.8, y=0.95)
+  colKurtosis <- textGrob(paste("Kurtosis: ",round(kurtosis(data[[numCol]], na.rm = T), 2)), x=0.79, y=0.87)
+   
+  plotV <- ggplot(data, aes(data[[numCol]])) +
+           geom_histogram(fill="dark blue") + 
+           labs(title=paste0("Histogram For ", numCol), x=numCol) +
+           theme_grey()
+  plotV = plotV + annotation_custom(colSkewness) + annotation_custom(colKurtosis)
+  return(plotV)
+}
+
+#Barplot for Categorical Feature
+UDFPlotBarPlotForCatFeature <- function(data, catCol, flip=F){
+  plotV <- ggplot(data, aes(data[[catCol]])) +
+    geom_bar(fill="dark blue") + 
+    labs(title=paste0("Barplot For ", catCol), x=catCol) +
+    theme_grey()
+  
+  if(flip){
+   plotV <- plotV + coord_flip()
+  }
+  plotV
+}
+
+# Boxplot for Numeric vs categorical feature
+UDFPlotBoxPlotForCatVsNumFeature <- function(data, catCol, numCol){
+ ggplot(data, aes(x=data[[catCol]], y=data[[numCol]])) +
+    geom_boxplot() +
+    labs(title=paste0(numCol, " Vs ", catCol), x=catCol, y=numCol) +
+    theme_gray()
+}
+
+#Barplot for Categorical feature Vs Categorical Target
+UDFPlotBarPlotForCatVsCatTarget <- function(data, catCol, flip=F){
+  plotV <- ggplot(data, aes(data[[catCol]], fill=FlightDelayStatus)) + 
+                  geom_bar() +
+                  labs(title=paste0(catCol, " Vs FlightDelayStatus"), x=catCol) +
+                  theme_grey() +
+                  theme(axis.text.x=element_text(size=11, angle=25))
+  if(flip){
+   plotV <- plotV + coord_flip()
+  }
+  plotV
+}
+
+#Scatter Plot for Numerical Vs Numerical Features
+UDFPlotScatterPlotForNumVsNumFeature <- function(data, numCol1, numCol2){
+  ggplot(data, aes(data[[numCol1]], data[[numCol2]])) +
+         labs(title=paste0(numCol1, " Vs ", numCol2), x=numCol1, y=numCol2) +
+         geom_point(col="blue")
+}
+
+# Plot density distribution for numerical columns
+UDFPlotDensityDistForNumFeature <- function(train, test, column){
+  par(mfrow=c(1, 2))
+  plot(density(train[[column]], na.rm=T), 
+       main=paste0("Train"),
+       xlab=column , ylab="Density")
+  plot(density(test[[column]], na.rm=T), 
+       main=paste0("Test"),
+       xlab=column , ylab="Density")
+}
+
+```
+
