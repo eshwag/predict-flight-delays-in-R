@@ -1,7 +1,5 @@
 ---
-title: "PHD: Read Aggregate & Merge for Train & Test data sets"
-author: "Batch39: 1843 - Gayathri Eshwarappa"
-date: "Jul 2018"
+title: "Aggregate & Merge Weather Data with Flight data"
 output:
   html_document:
     toc: yes
